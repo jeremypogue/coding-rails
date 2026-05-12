@@ -47,6 +47,13 @@ import sys
 from pathlib import Path
 from typing import Any
 
+# Share rule 008's patterns + config loader with the local commit-msg
+# rule. Both sites must apply the same enforcement; otherwise a project
+# can customize evidence behavior locally while CI enforces a different
+# policy (the v0.3.0 review's biggest remaining consistency gap).
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import _evidence_lib  # noqa: E402
+
 
 # ---- helpers ----
 
@@ -263,35 +270,12 @@ def check_base_sha_reachable(ledger_base_sha: str, base_sha: str, head_sha: str)
 
 # ---- check 8: commit-msg evidence scan ----
 
-COMPLETION_RE = re.compile(
-    r"(?i)\b(verified|shipped|confirmed|tested|smoked?)\b"
-)
-
-EVIDENCE_REGEXES = [
-    re.compile(r"(?i)https?://"),
-    re.compile(r"(?i)evidence:\s*\S{10,}"),
-    re.compile(r"(?i)pytest\b.*\bpassed\b"),
-    re.compile(r"(?i)screenshot:\s*\S+"),
-    re.compile(r"(?i)logbook:\s*\S+"),
-    re.compile(r"(?i)telegram:\s*\S+"),
-    re.compile(r"(?i)sms:\s*\S+"),
-    re.compile(r"(?i)physical-check:\s*\S+"),
-    re.compile(r"(?i)event_log:\s*\S+"),
-    re.compile(r"(?i)\.agent/tasks/\S+\.json"),
-]
-
-
-def _strip_comments(text: str) -> str:
-    return "\n".join(
-        line for line in text.splitlines() if not line.lstrip().startswith("#")
-    )
-
-
-def check_commit_msg_evidence(base_sha: str, head_sha: str) -> bool:
-    """For each commit in the PR range, if its message contains a
-    completion claim phrase, require at least one evidence-pattern
-    match in the same message. Mirrors rule 008 enforcement at PR time
-    in case the local commit-msg hook was bypassed."""
+def check_commit_msg_evidence(repo_root: Path, base_sha: str, head_sha: str) -> bool:
+    """For each commit in the PR range, validate its message against
+    rule 008's shared logic (`_evidence_lib.check_message`). Same
+    patterns and same per-project config as the local commit-msg hook —
+    no drift between local enforcement and CI enforcement.
+    """
     raw = run(
         "git", "log", "--format=%H%x00%B%x00END%x00",
         f"{base_sha}..{head_sha}",
@@ -299,7 +283,7 @@ def check_commit_msg_evidence(base_sha: str, head_sha: str) -> bool:
     if not raw:
         return True
 
-    failures: list[tuple[str, str]] = []
+    failures: list[tuple[str, str, list[str]]] = []
     # Records are SHA \x00 message \x00 END \x00
     for record in raw.split("END\x00"):
         record = record.strip()
@@ -309,26 +293,26 @@ def check_commit_msg_evidence(base_sha: str, head_sha: str) -> bool:
         if len(parts) != 2:
             continue
         sha, msg = parts[0].strip(), parts[1].strip()
-        msg_clean = _strip_comments(msg)
-        if not COMPLETION_RE.search(msg_clean):
+        passes, completion_hits = _evidence_lib.check_message(repo_root, msg)
+        if passes:
             continue
-        if any(p.search(msg_clean) for p in EVIDENCE_REGEXES):
-            continue
-        first_line = msg_clean.splitlines()[0][:60] if msg_clean else ""
-        failures.append((sha[:10], first_line))
+        clean = _evidence_lib.strip_git_comments(msg).strip()
+        first_line = clean.splitlines()[0][:60] if clean else ""
+        failures.append((sha[:10], first_line, completion_hits))
 
     if failures:
         fail(
-            "the following commit(s) contain a completion phrase "
-            "(verified/shipped/confirmed/tested/smoked) without an evidence "
-            "reference:"
+            "the following commit(s) contain a completion phrase without an "
+            "evidence reference:"
         )
-        for sha, line in failures:
+        for sha, line, hits in failures:
             sys.stderr.write(f"    {sha}  {line}\n")
+            sys.stderr.write(f"      matched: {', '.join(hits)}\n")
         sys.stderr.write(
             "  Each such commit needs an evidence ref in its message "
             "(URL, pytest output, evidence:, screenshot:, logbook:, etc.) "
-            "or rephrase to not claim completion.\n"
+            "or rephrase to not claim completion. Project may customize "
+            "completion/evidence patterns in .agent/coding-rails.config.yml.\n"
         )
         return False
     return True
@@ -336,46 +320,109 @@ def check_commit_msg_evidence(base_sha: str, head_sha: str) -> bool:
 
 # ---- check 9: allowed_paths-growth guard ----
 
+def _first_pr_commit_for_path(
+    base_sha: str, head_sha: str, path: str
+) -> str | None:
+    """Find the earliest commit in (base..head] that touched `path`.
+    Returns commit SHA or None if path wasn't touched in the range."""
+    try:
+        raw = subprocess.check_output(
+            [
+                "git", "log",
+                "--reverse",
+                "--format=%H",
+                f"{base_sha}..{head_sha}",
+                "--",
+                path,
+            ],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+    except subprocess.CalledProcessError:
+        return None
+    if not raw:
+        return None
+    return raw.splitlines()[0]
+
+
 def check_allowed_paths_not_expanded(
-    repo_root: Path, ledger_rel_path: str, base_sha: str
+    repo_root: Path,
+    ledger_rel_path: str,
+    base_sha: str,
+    head_sha: str,
 ) -> bool:
-    """If allowed_paths was modified by this PR, verify the new list is
-    a SUBSET of the base's list. Catches agent-driven scope expansion."""
+    """If `allowed_paths` was modified by this PR, verify the new list is
+    a SUBSET of the EARLIEST-in-PR version. Catches both:
+
+      (a) Pre-existing ledger expanded mid-PR.
+      (b) Ledger CREATED in commit 1 with narrow scope, then EXPANDED in
+          commit 2. (Previously this case slipped through because no
+          base-SHA ledger existed to compare against.)
+
+    Comparison baseline:
+      1. If the ledger existed at `base_sha`, compare to that version.
+      2. Otherwise find the earliest commit in (base..head] that
+         introduced the ledger and compare to that version.
+      3. If neither exists, the ledger isn't part of this PR — no
+         comparison needed, return True.
+    """
+    base_data: dict | None = None
+
+    # Try the base SHA first (pre-existing ledger case)
     try:
         base_blob = subprocess.check_output(
             ["git", "show", f"{base_sha}:{ledger_rel_path}"],
             text=True,
             stderr=subprocess.DEVNULL,
         )
+        try:
+            base_data = json.loads(base_blob)
+            compare_label = f"base ({base_sha[:10]})"
+        except json.JSONDecodeError:
+            sys.stderr.write(
+                "  NOTE: base-SHA ledger unparseable; skipping.\n"
+            )
+            return True
     except subprocess.CalledProcessError:
-        # Ledger did not exist at base SHA — this is the first commit
-        # creating the ledger. No comparison possible / needed.
-        return True
-
-    try:
-        base_data = json.loads(base_blob)
-    except json.JSONDecodeError:
-        # Base ledger unreadable; skip with notice.
-        sys.stderr.write(
-            "  NOTE: base-SHA ledger unparseable; skipping scope-expansion check.\n"
+        # Ledger didn't exist at base. Find the earliest commit in PR
+        # that introduced it.
+        first_commit = _first_pr_commit_for_path(
+            base_sha, head_sha, ledger_rel_path
         )
-        return True
+        if first_commit is None:
+            return True
+        try:
+            first_blob = subprocess.check_output(
+                ["git", "show", f"{first_commit}:{ledger_rel_path}"],
+                text=True,
+                stderr=subprocess.DEVNULL,
+            )
+            base_data = json.loads(first_blob)
+            compare_label = f"first-in-PR commit ({first_commit[:10]})"
+        except (subprocess.CalledProcessError, json.JSONDecodeError):
+            sys.stderr.write(
+                "  NOTE: first-in-PR ledger unparseable; skipping.\n"
+            )
+            return True
 
     base_allowed = set(base_data.get("allowed_paths") or [])
-    head_data = json.loads((repo_root / ledger_rel_path).read_text(encoding="utf-8"))
+    head_data = json.loads(
+        (repo_root / ledger_rel_path).read_text(encoding="utf-8")
+    )
     head_allowed = set(head_data.get("allowed_paths") or [])
 
     new_entries = head_allowed - base_allowed
     if new_entries:
         fail(
-            "allowed_paths was expanded by this PR — agent-driven scope "
-            "growth requires operator approval:"
+            f"allowed_paths was expanded since {compare_label} — agent-driven "
+            "scope growth requires operator approval:"
         )
         for entry in sorted(new_entries):
             sys.stderr.write(f"    + {entry}\n")
         sys.stderr.write(
-            "  Either remove the new entries (and the files that depend on them) "
-            "or have the operator update the ledger in a separate commit.\n"
+            "  Either remove the new entries (and the files that depend on "
+            "them) or have the operator update the ledger in a separate "
+            "operator-authored commit.\n"
         )
         return False
     return True
@@ -387,22 +434,43 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--pr", type=int, help="PR number (default: from env)")
     parser.add_argument("--repo", default=os.environ.get("GITHUB_REPOSITORY", ""))
+    parser.add_argument(
+        "--pr-json",
+        type=str,
+        default=None,
+        help=(
+            "Path to a JSON file containing PR metadata "
+            "(headRefName, baseRefName, baseRefOid, body, number, state, files). "
+            "Bypasses the `gh pr view` call. Intended for offline / CI-free "
+            "testing of main()."
+        ),
+    )
     args = parser.parse_args()
-
-    pr_number = args.pr or int(os.environ.get("PR_NUMBER") or os.environ.get("GITHUB_PR_NUMBER") or 0)
-    if not pr_number:
-        fail("PR number required (--pr or PR_NUMBER env)")
-        return 1
-
-    if not args.repo:
-        fail("GITHUB_REPOSITORY env or --repo argument required")
-        return 1
 
     repo_root = Path(run("git", "rev-parse", "--show-toplevel"))
 
-    # Fetch PR metadata
-    pr = gh_json("pr", "view", str(pr_number), "--repo", args.repo,
-                 "--json", "headRefName,baseRefName,baseRefOid,body,number,state,files")
+    # Fetch PR metadata (either from --pr-json file or via gh CLI)
+    if args.pr_json:
+        try:
+            pr = json.loads(Path(args.pr_json).read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            fail(f"--pr-json file unreadable or invalid: {exc}")
+            return 1
+        pr_number = pr.get("number") or args.pr or 0
+    else:
+        pr_number = args.pr or int(
+            os.environ.get("PR_NUMBER") or os.environ.get("GITHUB_PR_NUMBER") or 0
+        )
+        if not pr_number:
+            fail("PR number required (--pr, PR_NUMBER env, or --pr-json)")
+            return 1
+        if not args.repo:
+            fail("GITHUB_REPOSITORY env or --repo argument required")
+            return 1
+        pr = gh_json(
+            "pr", "view", str(pr_number), "--repo", args.repo,
+            "--json", "headRefName,baseRefName,baseRefOid,body,number,state,files",
+        )
 
     branch = pr["headRefName"]
     base_ref = pr["baseRefName"]
@@ -466,14 +534,17 @@ def main() -> int:
         if not check_base_sha_reachable(ledger_base, base_sha, head_sha):
             all_ok = False
 
-    # 8. commit-msg evidence scan
-    if not check_commit_msg_evidence(base_sha, head_sha):
+    # 8. commit-msg evidence scan (uses shared _evidence_lib for parity
+    #    with the local commit-msg hook + per-project config)
+    if not check_commit_msg_evidence(repo_root, base_sha, head_sha):
         all_ok = False
 
     # 9. allowed_paths-growth guard
     if ledger_path is not None:
         rel = str(ledger_path.relative_to(repo_root)).replace("\\", "/")
-        if not check_allowed_paths_not_expanded(repo_root, rel, base_sha):
+        if not check_allowed_paths_not_expanded(
+            repo_root, rel, base_sha, head_sha
+        ):
             all_ok = False
 
     if all_ok:

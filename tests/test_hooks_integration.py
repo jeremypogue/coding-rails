@@ -162,3 +162,121 @@ def test_pre_push_blocks_main(bash_repo_with_origin, installer):
     )
     assert push.returncode != 0
     assert "shared branch" in (push.stdout + push.stderr).lower() or "refusing" in (push.stdout + push.stderr).lower()
+
+
+def test_pre_push_blocks_force_push(bash_repo_with_origin, installer):
+    """pre-push should refuse non-fast-forward / force pushes."""
+    import pytest as _pytest
+    repo, _ = bash_repo_with_origin
+    _install_and_commit_seed(repo, installer)
+
+    # Create + push an agent branch normally
+    subprocess.run(
+        ["git", "checkout", "-b", "agent/test/20260512-force"],
+        cwd=str(repo), check=True, capture_output=True,
+    )
+    tasks = repo / ".agent" / "tasks"
+    tasks.mkdir(exist_ok=True)
+    (tasks / "20260512-force.json").write_text(
+        '{"task_id": "20260512-force", "branch": "agent/test/20260512-force", '
+        '"allowed_paths": ["src/foo.py"], "status": "in_progress", '
+        '"base_ref": "origin/main"}',
+        encoding="utf-8",
+    )
+    (repo / "src").mkdir(exist_ok=True)
+    (repo / "src" / "foo.py").write_text("x = 1\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "add", "src/foo.py", ".agent/tasks/20260512-force.json"],
+        cwd=str(repo), check=True,
+    )
+    subprocess.run(
+        ["git", "commit", "-m", "first"],
+        cwd=str(repo), check=True, capture_output=True,
+    )
+    first_push = subprocess.run(
+        ["git", "push", "-u", "origin", "agent/test/20260512-force"],
+        cwd=str(repo), capture_output=True, text=True,
+    )
+    if first_push.returncode != 0:
+        _pytest.skip(
+            f"initial push failed; cannot test force-push refusal: "
+            f"{first_push.stdout}\n{first_push.stderr}"
+        )
+
+    # Rewrite history and attempt force-push
+    subprocess.run(
+        ["git", "commit", "--amend", "-m", "first (amended)"],
+        cwd=str(repo), check=True, capture_output=True,
+    )
+    push = subprocess.run(
+        ["git", "push", "--force", "origin", "agent/test/20260512-force"],
+        cwd=str(repo), capture_output=True, text=True,
+    )
+    assert push.returncode != 0
+    err = (push.stdout + push.stderr).lower()
+    assert (
+        "force" in err
+        or "non-fast-forward" in err
+        or "fast-forward" in err
+        or "refusing" in err
+    )
+
+
+def test_pre_push_blocks_merge_commit_in_range(bash_repo_with_origin, installer):
+    """pre-push should refuse a push containing a merge commit in the range."""
+    import pytest as _pytest
+    repo, _ = bash_repo_with_origin
+    _install_and_commit_seed(repo, installer)
+
+    # Create agent branch with one commit
+    subprocess.run(
+        ["git", "checkout", "-b", "agent/test/20260512-mcommit"],
+        cwd=str(repo), check=True, capture_output=True,
+    )
+    tasks = repo / ".agent" / "tasks"
+    tasks.mkdir(exist_ok=True)
+    (tasks / "20260512-mcommit.json").write_text(
+        '{"task_id": "20260512-mcommit", "branch": "agent/test/20260512-mcommit", '
+        '"allowed_paths": ["src/foo.py"], "status": "in_progress", '
+        '"base_ref": "origin/main"}',
+        encoding="utf-8",
+    )
+    (repo / "src").mkdir(exist_ok=True)
+    (repo / "src" / "foo.py").write_text("x = 1\n", encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=str(repo), check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "agent branch commit 1"],
+        cwd=str(repo), check=True, capture_output=True,
+    )
+
+    # Create divergent side branch
+    subprocess.run(
+        ["git", "checkout", "-b", "sidebar"],
+        cwd=str(repo), check=True, capture_output=True,
+    )
+    (repo / "side.txt").write_text("side", encoding="utf-8")
+    subprocess.run(["git", "add", "side.txt"], cwd=str(repo), check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "side commit"],
+        cwd=str(repo), check=True, capture_output=True,
+    )
+
+    # Merge sidebar into agent branch (no-ff produces a merge commit)
+    subprocess.run(
+        ["git", "checkout", "agent/test/20260512-mcommit"],
+        cwd=str(repo), check=True, capture_output=True,
+    )
+    merge = subprocess.run(
+        ["git", "merge", "--no-ff", "--no-edit", "sidebar"],
+        cwd=str(repo), capture_output=True, text=True,
+    )
+    if merge.returncode != 0:
+        _pytest.skip(f"could not stage a merge commit: {merge.stderr}")
+
+    push = subprocess.run(
+        ["git", "push", "-u", "origin", "agent/test/20260512-mcommit"],
+        cwd=str(repo), capture_output=True, text=True,
+    )
+    assert push.returncode != 0
+    err = (push.stdout + push.stderr).lower()
+    assert "merge commit" in err or "linear" in err or "refusing" in err
