@@ -23,6 +23,7 @@ permissions:
 
 jobs:
   rules-check:
+    name: agent-rules-check
     runs-on: ubuntu-latest
     steps:
       - name: Check out

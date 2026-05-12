@@ -127,7 +127,19 @@ def main() -> int:
         )
         return 1
 
-    out_of_scope = [p for p in staged if not path_matches_allowed(p, allowed)]
+    # Bookkeeping paths are always allowed without explicit declaration.
+    # The task ledger itself must be commitable so CI can see it; the
+    # exceptions file is operator-maintained; runtime state under
+    # .agent/state/ is gitignored anyway but listing it here is harmless.
+    bookkeeping = {
+        str(ledger.relative_to(repo_root)).replace("\\", "/"),
+        ".agent/test-coverage-exceptions.md",
+    }
+
+    out_of_scope = [
+        p for p in staged
+        if p not in bookkeeping and not path_matches_allowed(p, allowed)
+    ]
     if out_of_scope:
         fail("the following staged paths are outside allowed_paths:")
         for p in out_of_scope:

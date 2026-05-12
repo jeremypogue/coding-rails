@@ -48,6 +48,25 @@ Projects with different layouts override these in their config file. The check h
 - **Pre-commit** — detects when an agent-surface file is staged without its paired test file, blocks the commit, prints which test is missing.
 - **PR completion gate (CI)** — re-runs the check against the full diff, in case the local hook was bypassed.
 
+## Operator-maintained exceptions
+
+If a code change genuinely does not need a paired test (e.g. comment-only change, generated file, third-party vendoring), the operator adds the path glob to `.agent/test-coverage-exceptions.md`:
+
+```markdown
+# Generated files have no source-of-truth to test
+agents/_generated_*.py
+
+# Vendored library
+agents/_vendor.py
+
+# Comment-only refactor approved in PR #42
+agents/docs.py
+```
+
+The format is one path glob per line; lines starting with `#` are comments; inline ` # ...` is stripped.
+
+The check script reads this file at every run; no commit-time interaction needed. Operator owns the file; agents do not modify it.
+
 ## Bypass policy
 
-There is no agent-side bypass. If a code change genuinely does not need a paired test (e.g. comment-only change, generated file), the operator adds an exception note in `.agent/test-coverage-exceptions.md` referencing the commit SHA and the reason.
+There is no agent-side bypass through the script. The only path to skip the paired-test requirement is an operator-authored entry in `.agent/test-coverage-exceptions.md`, which is committed and visible in the PR.

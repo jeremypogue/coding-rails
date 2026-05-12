@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# coding-rails commit-msg hook
+#
+# Runs after the commit message is composed but before the commit is
+# finalized. Invokes any rule script that needs the commit message
+# (currently: 008_evidence_required.py).
+#
+# Receives the path to COMMIT_EDITMSG as $1.
+
+set -uo pipefail
+
+REPO="$(git rev-parse --show-toplevel)"
+SCRIPT="${REPO}/scripts/coding-rails/rules/008_evidence_required.py"
+
+if [ ! -f "${SCRIPT}" ]; then
+  exit 0
+fi
+
+# Pass the commit message file path through. The script reads it and
+# exits non-zero if a completion-claim phrase appears without an
+# evidence reference.
+if ! python3 "${SCRIPT}" "$1"; then
+  echo "" >&2
+  echo "Commit-msg blocked. Either add an evidence reference or rephrase." >&2
+  exit 1
+fi
+exit 0

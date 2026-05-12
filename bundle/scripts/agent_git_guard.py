@@ -76,7 +76,25 @@ def is_shared_branch(target: str) -> bool:
 def check_git(argv: list[str]) -> int:
     if len(argv) < 2:
         return allow()
-    sub = argv[1]
+
+    # Strip leading `-c KEY=VALUE` config overrides and inspect them.
+    # `git -c core.hooksPath=/dev/null commit` etc. is a way to disable
+    # hooks per-command without modifying the repo config.
+    cursor = 1
+    while cursor < len(argv) - 1 and argv[cursor] == "-c":
+        kv = argv[cursor + 1]
+        key = kv.split("=", 1)[0].strip().lower()
+        if key in {"core.hookspath", "core.hookpath"}:
+            return deny(
+                "`git -c core.hooksPath=...` is not allowed. It bypasses the "
+                "hook chain per-command. Hooks are not optional in agent context."
+            )
+        cursor += 2
+
+    if cursor >= len(argv):
+        return allow()
+    sub = argv[cursor]
+    rest = argv[cursor + 1:]
 
     # ---- absolute refusals ----
     if sub in {"reset", "restore", "clean", "stash", "rebase", "merge"}:
@@ -84,8 +102,7 @@ def check_git(argv: list[str]) -> int:
                     "Resolve via fresh branch from origin/main, or ask the operator.")
 
     if sub == "checkout":
-        rest = " ".join(argv[2:])
-        if "--ours" in argv or "--theirs" in argv:
+        if "--ours" in rest or "--theirs" in rest:
             return deny("`git checkout --ours/--theirs` (blanket conflict resolution) "
                         "is not allowed. Resolve conflicts file-by-file or restart from "
                         "a clean rebase.")
@@ -94,7 +111,6 @@ def check_git(argv: list[str]) -> int:
         return allow()
 
     if sub == "add":
-        rest = argv[2:]
         if rest and rest[0] in {".", "-A", "--all", "-u", "--update", "*"}:
             return deny("`git add . / -A / --all / -u / *` is not allowed. "
                         "Stage explicit file paths only — this prevents accidentally "
@@ -102,17 +118,23 @@ def check_git(argv: list[str]) -> int:
         return allow()
 
     if sub == "push":
-        # Detect force pushes
-        for token in argv[2:]:
+        # Detect force pushes and bypass flags
+        for token in rest:
             if token in {"--force", "-f", "--force-with-lease", "--force-with-lease="}:
                 return deny("`git push --force` / `--force-with-lease` is not allowed.")
             if token.startswith("--force-with-lease="):
                 return deny("`git push --force-with-lease=...` is not allowed.")
+            if token in {"--no-verify", "-n"}:
+                return deny(
+                    "`git push --no-verify` is not allowed. It bypasses the pre-push "
+                    "hook entirely. Operator-driven bypass is via explicit env var, "
+                    "not a flag."
+                )
         # Detect push target. Forms accepted:
         #   git push origin <branch>
         #   git push -u origin <branch>
         #   git push --set-upstream origin <branch>
-        tokens = argv[2:]
+        tokens = rest
         flags = {"-u", "--set-upstream"}
         positional: list[str] = []
         i = 0

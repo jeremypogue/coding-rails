@@ -50,9 +50,12 @@ This script also creates the agent's working branch and writes the resolved base
 
 ## Enforcement
 
-- **Pre-commit** — refuses commit if no `.agent/tasks/<task_id>.json` matches the current branch, or if `allowed_paths` does not include every staged file.
-- **PR completion gate (CI)** — refuses PR merge if the task ledger references a `base_sha` that has been rewritten or no longer exists.
+- **Pre-commit** — refuses commit if no `.agent/tasks/<task_id>.json` matches the current branch, or if `allowed_paths` does not include every staged file. The task ledger itself (and `.agent/test-coverage-exceptions.md`) are bookkeeping paths and always allowed without explicit declaration.
+- **PR completion gate (CI)** — refuses PR merge if:
+  - The ledger's `base_sha` is not reachable from the PR's base or head (the branch was rebased onto a stale base).
+  - The ledger's `allowed_paths` was *expanded* by the PR itself (agent-driven scope growth is rejected).
+  - Any changed file is outside `allowed_paths`.
 
 ## Bypass policy
 
-There is no agent-side bypass. If you need to make a change outside a task scope, an operator must edit the ledger directly.
+There is no agent-side bypass. If you need to make a change outside a task scope, an operator must edit the ledger directly in a separate commit or PR.

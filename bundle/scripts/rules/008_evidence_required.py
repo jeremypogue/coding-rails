@@ -1,14 +1,19 @@
 #!/usr/bin/env python3
 """coding-rails rule 008 — evidence required for completion claims.
 
-Invoked by .githooks/pre-commit (or as a commit-msg hook depending on how
-the project wires it). Scans the commit message for completion phrases
-('verified', 'shipped', 'confirmed', 'tested', 'smoked'). If any are
-present, requires at least one matching evidence pattern.
+Invoked by .githooks/commit-msg. The commit-msg hook receives the path
+to COMMIT_EDITMSG as its first argument and re-runs this script to
+validate the prepared commit message. Pre-commit fires too early —
+COMMIT_EDITMSG does not exist yet when pre-commit runs.
 
-Pre-commit invocation: this script reads the prepared commit message from
-.git/COMMIT_EDITMSG. The pre-commit hook calls it AFTER staging is
-finalized but BEFORE the commit object is created.
+The pre-commit hook may still invoke this script (the aggregator runs
+all *.py under scripts/coding-rails/rules/) but in that case there is
+no commit message to read and we exit 0 silently. The real enforcement
+happens in the commit-msg hook.
+
+Scans the commit message for completion phrases ('verified', 'shipped',
+'confirmed', 'tested', 'smoked'). If any are present, requires at least
+one matching evidence pattern.
 
 Exits 0 on pass, non-zero on fail.
 """
@@ -19,6 +24,11 @@ import re
 import subprocess
 import sys
 from pathlib import Path
+
+# Stage hint: this rule depends on the commit-msg hook stage, not
+# pre-commit. The aggregator may use this hint in future versions to
+# skip pre-commit invocation entirely.
+_STAGE = "commit-msg"
 
 
 DEFAULT_COMPLETION_PATTERNS = [
