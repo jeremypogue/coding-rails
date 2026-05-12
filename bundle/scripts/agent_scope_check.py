@@ -1,26 +1,33 @@
 #!/usr/bin/env python3
-"""coding-rails — agent_scope_status.py
+"""coding-rails — agent_scope_check.py
 
-One-shot scope status check. Reports whether the current working tree
-is within the task's allowed_paths, and surfaces any existing drift
-record. Does not modify state.
+One-shot scope status check (the canonical rule-010 detection logic).
+Reports whether the current working tree is within the task's
+allowed_paths, and surfaces any existing drift record. Does not
+modify state unless `--write-drift` is passed.
 
-Useful for:
-  - Operator checking session state at any time
-  - CI / pre-push validation that scope is clean
-  - The watcher's underlying check (it polls this logic continuously)
+Used by:
+  - Operators checking session state at any time
+  - `agent_scope_watch.py` (polls this logic continuously)
+  - `agent_checkpoint.py` (one-liner status for per-turn output)
 
 Exit codes:
-  0 — clean (no drift, no out-of-scope changes)
+  0 — clean (no drift, no out-of-scope changes), OR rule disabled via config
   1 — drift detected (out-of-scope changes OR unresolved drift record)
   2 — no task / no ledger for current branch (informational)
 
 Usage:
-  agent_scope_status.py [--task-id <id>] [--write-drift]
+  agent_scope_check.py [--task-id <id>] [--write-drift] [--quiet]
 
   --task-id <id>    explicitly target a task; otherwise resolved by current branch
   --write-drift     if drift detected, write/update .agent/drift/<task_id>.json
                     (used by the watcher; not normal CLI invocation)
+  --quiet           suppress informational stdout (errors still print)
+
+Configuration (via `.agent/coding-rails.config.yml`):
+  scope_enforcement:
+    enabled: true                  # rule 010 active by default
+    bookkeeping_paths: []          # extra globs always allowed beyond defaults
 """
 
 from __future__ import annotations
@@ -51,6 +58,7 @@ GLOBAL_BOOKKEEPING_GLOBS = [
     ".agent/drift/.gitignore",
     ".agent/scope/*",        # scope locks — written by start_task
     ".agent/scope/.gitkeep",
+    ".agent/coding-rails.config.yml",   # per-project config; operator-edited
 ]
 
 
@@ -60,6 +68,43 @@ def run(*args: str) -> str:
 
 def find_repo_root() -> Path:
     return Path(run("git", "rev-parse", "--show-toplevel"))
+
+
+def load_scope_config(repo_root: Path) -> dict:
+    """Load `scope_enforcement` from `.agent/coding-rails.config.yml`.
+    Returns defaults if the file or PyYAML is unavailable.
+
+    Defaults:
+      enabled: true
+      bookkeeping_paths: []
+      watch_interval_seconds: 1.0
+      require_clean_scope_before_finish: true
+      fail_on_drift: true
+    """
+    defaults = {
+        "enabled": True,
+        "bookkeeping_paths": [],
+        "watch_interval_seconds": 1.0,
+        "require_clean_scope_before_finish": True,
+        "fail_on_drift": True,
+    }
+    cfg_path = repo_root / ".agent" / "coding-rails.config.yml"
+    if not cfg_path.is_file():
+        return defaults
+    try:
+        import yaml  # type: ignore
+    except ImportError:
+        return defaults
+    try:
+        loaded = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+    except yaml.YAMLError:
+        return defaults
+    section = loaded.get("scope_enforcement") or {}
+    out = dict(defaults)
+    for key in defaults:
+        if key in section:
+            out[key] = section[key]
+    return out
 
 
 def current_branch() -> str:
@@ -171,36 +216,45 @@ def main() -> int:
     args = parser.parse_args()
 
     repo_root = find_repo_root()
+    config = load_scope_config(repo_root)
+
+    if not config.get("enabled", True):
+        if not args.quiet:
+            print("scope-check: rule 010 disabled via scope_enforcement.enabled=false.")
+        return 0
+
     branch = current_branch()
 
     if not branch.startswith("agent/") and not args.task_id:
         if not args.quiet:
-            print("scope-status: not on an agent branch; rule 010 does not apply.")
+            print("scope-check: not on an agent branch; rule 010 does not apply.")
         return 2
 
     ledger_path = find_ledger(repo_root, branch, args.task_id)
     if ledger_path is None:
         if not args.quiet:
             sys.stderr.write(
-                "scope-status: no ledger for branch / task-id; nothing to check.\n"
+                "scope-check: no ledger for branch / task-id; nothing to check.\n"
             )
         return 2
 
     try:
         ledger = json.loads(ledger_path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError) as exc:
-        sys.stderr.write(f"scope-status: ledger unreadable: {exc}\n")
+        sys.stderr.write(f"scope-check: ledger unreadable: {exc}\n")
         return 2
 
     task_id = ledger["task_id"]
     allowed_paths: list[str] = ledger.get("allowed_paths") or []
-    bookkeeping: list[str] = ledger.get("bookkeeping_paths") or []
+    bookkeeping: list[str] = list(ledger.get("bookkeeping_paths") or [])
     # The ledger itself is always bookkeeping
-    bookkeeping = list(bookkeeping) + [
+    bookkeeping.append(
         str(ledger_path.relative_to(repo_root)).replace("\\", "/")
-    ]
+    )
     # The scope lock for this task is always bookkeeping
     bookkeeping.append(f".agent/scope/{task_id}.lock")
+    # Per-project additions from scope_enforcement.bookkeeping_paths
+    bookkeeping.extend(config.get("bookkeeping_paths") or [])
 
     changes = working_tree_changes(repo_root)
     unauthorized = [p for _, p in changes if not is_in_scope(p, allowed_paths, bookkeeping)]
@@ -216,7 +270,7 @@ def main() -> int:
 
     if unauthorized:
         sys.stderr.write(
-            f"scope-status: DRIFT — {len(unauthorized)} unauthorized path(s) "
+            f"scope-check: DRIFT — {len(unauthorized)} unauthorized path(s) "
             f"in working tree for task {task_id}\n"
         )
         for p in sorted(set(unauthorized)):
@@ -237,7 +291,7 @@ def main() -> int:
 
     if existing_drift and existing_drift.get("status") == "unresolved":
         sys.stderr.write(
-            f"scope-status: stale unresolved drift record for task {task_id}.\n"
+            f"scope-check: stale unresolved drift record for task {task_id}.\n"
             f"  Working tree is currently clean, but the drift record at\n"
             f"  {drift_path.relative_to(repo_root)} remains unresolved.\n"
             f"  Operator must either set status: resolved or delete the file.\n"
@@ -246,7 +300,7 @@ def main() -> int:
 
     if not args.quiet:
         print(
-            f"scope-status: clean. task={task_id}  branch={branch}  "
+            f"scope-check: clean. task={task_id}  branch={branch}  "
             f"allowed_paths={len(allowed_paths)}"
         )
     return 0

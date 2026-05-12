@@ -125,6 +125,34 @@ except Exception:
           continue
         fi
       fi
+
+      # ---- scope-lock + drift-record immutability in pushed range ----
+      # If the pushed range modifies either file (without the operator
+      # override env var), refuse.
+      if [ "${OPERATOR_REVIEWED_BYPASS:-0}" != "1" ] && \
+         [ "${CODING_RAILS_OPERATOR_SCOPE_UPDATE:-0}" != "1" ]; then
+        scope_lock_rel=".agent/scope/${task_id_for_drift}.lock"
+        drift_rel=".agent/drift/${task_id_for_drift}.json"
+
+        if [ "${remote_sha}" = "0000000000000000000000000000000000000000" ]; then
+          range_diff_args=("${local_sha}" "--not" "--remotes=origin")
+          immut_files="$(git log --name-status --format= "${range_diff_args[@]}" -- "${scope_lock_rel}" "${drift_rel}" 2>/dev/null | awk '$1 ~ /^[MDR]/ {print $0}' || true)"
+        else
+          immut_files="$(git log --name-status --format= "${remote_sha}..${local_sha}" -- "${scope_lock_rel}" "${drift_rel}" 2>/dev/null | awk '$1 ~ /^[MDR]/ {print $0}' || true)"
+        fi
+
+        if [ -n "${immut_files}" ]; then
+          fail "scope lock or drift record modified in pushed range (rule 010):"
+          while IFS= read -r line; do
+            [ -z "${line}" ] && continue
+            fail "    ${line}"
+          done <<<"${immut_files}"
+          fail "  These files are agent-immutable after creation."
+          fail "  Operator override: CODING_RAILS_OPERATOR_SCOPE_UPDATE=1 git push ..."
+          failed=1
+          continue
+        fi
+      fi
     fi
   fi
 

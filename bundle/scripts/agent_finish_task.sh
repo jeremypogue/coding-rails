@@ -90,9 +90,65 @@ if ! git diff --quiet || ! git diff --cached --quiet; then
   exit 2
 fi
 
+# ---- read scope_enforcement config (rule 010 toggles) ----
+require_clean_scope="$(python3 -c "
+try:
+    import yaml
+    import pathlib
+    p = pathlib.Path(r'${REPO}/.agent/coding-rails.config.yml')
+    if p.is_file():
+        data = yaml.safe_load(p.read_text(encoding='utf-8')) or {}
+        section = data.get('scope_enforcement') or {}
+        v = section.get('require_clean_scope_before_finish', True)
+        print('1' if v else '0')
+    else:
+        print('1')
+except Exception:
+    print('1')
+" 2>/dev/null || echo 1)"
+
+# ---- scope-lock + drift-record immutability (rule 010, v0.6.0) ----
+# Refuse if either file CHANGED in base_ref..HEAD (not just initial
+# creation). Initial addition is allowed because agent_start_task.sh
+# creates the scope lock in the first commit; subsequent commits must
+# not modify either file.
+scope_lock_rel=".agent/scope/${task_id}.lock"
+drift_rel=".agent/drift/${task_id}.json"
+
+operator_override="${CODING_RAILS_OPERATOR_SCOPE_UPDATE:-0}"
+
+# Was the file modified (M or D status) in the range?
+range_modified() {
+  local rel="$1"
+  local status
+  status="$(git diff --name-status "${base_ref}..HEAD" -- "${rel}" 2>/dev/null | awk '{print $1}' | head -1)"
+  case "${status}" in
+    M*|D*|R*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+if [ "${operator_override}" != "1" ]; then
+  if range_modified "${scope_lock_rel}"; then
+    fail "scope lock modified in ${base_ref}..HEAD: ${scope_lock_rel}"
+    fail "  The scope lock is immutable after task start. Modifying it"
+    fail "  defeats the scope-hash check. Operator override:"
+    fail "    CODING_RAILS_OPERATOR_SCOPE_UPDATE=1 ./scripts/coding-rails/agent_finish_task.sh"
+    exit 11
+  fi
+  if range_modified "${drift_rel}"; then
+    fail "drift record modified in ${base_ref}..HEAD: ${drift_rel}"
+    fail "  Drift records are written by the watcher and resolved only"
+    fail "  by operator action. Agent-side modification is not allowed."
+    fail "  Operator override: CODING_RAILS_OPERATOR_SCOPE_UPDATE=1 ..."
+    exit 11
+  fi
+fi
+
 # ---- drift-record check (rule 010) ----
+# Skipped entirely if scope_enforcement.require_clean_scope_before_finish=false.
 drift_path="${REPO}/.agent/drift/${task_id}.json"
-if [ -f "${drift_path}" ]; then
+if [ "${require_clean_scope}" = "1" ] && [ -f "${drift_path}" ]; then
   drift_status="$(python3 -c "
 import json, sys
 try:
@@ -118,9 +174,12 @@ fi
 # detection was OFF; we can't certify scope was monitored across the
 # session. Operator can override by deleting the heartbeat file (formally
 # attesting they verified scope manually) and re-running.
+# Skipped entirely if scope_enforcement.require_clean_scope_before_finish=false.
 heartbeat_path="${REPO}/.agent/state/${task_id}.heartbeat"
 max_heartbeat_age="${CODING_RAILS_MAX_HEARTBEAT_AGE:-60}"
-if [ ! -f "${heartbeat_path}" ]; then
+if [ "${require_clean_scope}" != "1" ]; then
+  : # heartbeat check disabled via config
+elif [ ! -f "${heartbeat_path}" ]; then
   fail "no scope-watcher heartbeat at ${heartbeat_path#${REPO}/}"
   fail "  Rule 010 expects agent_scope_watch.py to have run during this task."
   fail "  Either run the watcher and retry:"

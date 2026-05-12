@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -62,6 +63,37 @@ def fail(reason: str) -> None:
     sys.stderr.write(f"rule 010 (scope lock): {reason}\n")
 
 
+def file_existed_in_head(repo_root: Path, rel_path: str) -> bool:
+    """True if the path exists in HEAD's tree (i.e. was committed before)."""
+    try:
+        subprocess.check_call(
+            ["git", "cat-file", "-e", f"HEAD:{rel_path}"],
+            cwd=str(repo_root),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        return True
+    except subprocess.CalledProcessError:
+        return False
+
+
+def staged_modifies(repo_root: Path, rel_path: str) -> bool:
+    """True if the path is staged for modification (not addition)."""
+    try:
+        raw = subprocess.check_output(
+            ["git", "diff", "--cached", "--name-status", "--", rel_path],
+            cwd=str(repo_root),
+            text=True,
+        ).strip()
+    except subprocess.CalledProcessError:
+        return False
+    if not raw:
+        return False
+    # Format: <status>\t<path>. Status M = modify, A = add, D = delete.
+    status = raw.split("\t", 1)[0]
+    return status.startswith("M") or status.startswith("D")
+
+
 def main() -> int:
     repo_root = find_repo_root()
     branch = current_branch()
@@ -84,6 +116,48 @@ def main() -> int:
     task_id = ledger_data.get("task_id")
     if not task_id:
         return 0
+
+    # ---- check 0: immutability of scope lock + drift record ----
+    # The scope lock is created by agent_start_task.sh and is then immutable
+    # from the agent's perspective. The drift record is written by the
+    # watcher and only resolved by the operator. If either was staged
+    # for MODIFICATION (not initial addition) without the operator escape
+    # hatch, refuse the commit. This closes the "agent edits ledger AND
+    # scope lock together" loophole that defeats the hash check below.
+    operator_override = os.environ.get("CODING_RAILS_OPERATOR_SCOPE_UPDATE") == "1"
+
+    scope_lock_rel = f".agent/scope/{task_id}.lock"
+    drift_rel = f".agent/drift/{task_id}.json"
+
+    if not operator_override:
+        if file_existed_in_head(repo_root, scope_lock_rel) and staged_modifies(repo_root, scope_lock_rel):
+            fail(
+                f"refusing to commit modification of {scope_lock_rel}"
+            )
+            sys.stderr.write(
+                "  The scope lock is immutable after task start. Modifying it\n"
+                "  defeats the scope-hash check that catches ledger expansion.\n"
+                "  Operator override (after manual review): set\n"
+                "    CODING_RAILS_OPERATOR_SCOPE_UPDATE=1 git commit ...\n"
+                "  Audit: that env var leaves a visible trail in operator logs.\n"
+            )
+            return 1
+
+        if file_existed_in_head(repo_root, drift_rel) and staged_modifies(repo_root, drift_rel):
+            # Drift record state transition (e.g. unresolved → resolved)
+            # may only be performed by the operator. The watcher writes
+            # the record fresh; resolution flips status; the agent must
+            # not stage either.
+            fail(
+                f"refusing to commit modification of {drift_rel}"
+            )
+            sys.stderr.write(
+                "  Drift records are written by agent_scope_watch.py / agent_scope_check.py\n"
+                "  and resolved by operator action. Agents may not flip status\n"
+                "  or otherwise edit existing drift records.\n"
+                "  Operator override: CODING_RAILS_OPERATOR_SCOPE_UPDATE=1 git commit ...\n"
+            )
+            return 1
 
     # ---- check 1: drift record ----
     drift_path = repo_root / ".agent" / "drift" / f"{task_id}.json"

@@ -2,6 +2,51 @@
 
 All notable changes to coding-rails are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Semver.
 
+## [0.6.0] — 2026-05-12
+
+Closes the biggest remaining hole in v0.5.0: the scope lock was mutable by the agent. If the agent edited both the ledger AND the scope lock to match, rule 010's hash check would pass. v0.6.0 makes both files immutable after creation from the agent's perspective. Also wires the previously-decorative `scope_enforcement` config keys to actual behavior.
+
+### Fixed
+
+- **Scope lock and drift record are now agent-immutable after creation.** `010_scope_lock.py` refuses any commit that stages a MODIFICATION (not initial addition) of `.agent/scope/<task_id>.lock` or `.agent/drift/<task_id>.json`. Closes the "agent edits ledger + scope lock together so hashes match" loophole that defeated v0.5.0's hash check.
+- **`agent_finish_task.sh` refuses if either file changed in `base_ref..HEAD`** even when hashes happen to match. Catches mid-PR mutation.
+- **`bundle/hooks/pre-push` refuses pushes whose range modifies either file** without the operator override env var. Closes the same window at push time.
+- **`scope_enforcement` config keys are now real, not decorative:**
+  - `enabled` — `agent_scope_check.py` returns 0 immediately when false (rule 010 disabled)
+  - `bookkeeping_paths` — per-project additional auto-allowed path globs honored by `agent_scope_check.py`
+  - `watch_interval_seconds` — `agent_scope_watch.py` reads this as the default interval when `--interval` isn't passed
+  - `require_clean_scope_before_finish` — `agent_finish_task.sh` skips drift + heartbeat checks when false (operator-only opt-out)
+- **`.agent/coding-rails.config.yml` is now in `GLOBAL_BOOKKEEPING_GLOBS`** — projects can edit their config without scope-checker flagging it as out-of-scope.
+- **Docstring drift in `agent_scope_check.py`** — header and stderr messages no longer say "scope-status:" (the file was renamed from `agent_scope_status.py` in v0.5.0).
+
+### Added
+
+- **Operator escape hatch: `CODING_RAILS_OPERATOR_SCOPE_UPDATE=1`**. When set, the immutability checks (commit, finish, push) allow scope lock and drift record changes. The flag is in `agent_git_guard.py`'s `BYPASS_ENV_RE` so agents can't set it inline; only the operator can.
+
+### Tests
+
+- `test_010_blocks_staged_modification_of_existing_scope_lock` — REGRESSION for the v0.5.0 hole
+- `test_010_blocks_staged_modification_of_existing_drift_record` — REGRESSION for agent-driven status flip
+- `test_010_allows_initial_creation_of_scope_lock` — baseline confirming first-commit is allowed
+- `test_010_operator_override_allows_scope_lock_modification` — the override path works
+- `test_scope_check_disabled_via_config` — `enabled: false` short-circuits the rule
+- `test_scope_check_per_project_bookkeeping_paths` — config-defined globs honored
+
+### Self-test counts
+
+- v0.5.0: 180 + 1 skipped
+- **v0.6.0: 186 + 1 skipped** (+6 net for v0.6.0)
+
+### Naming notes
+
+The rule's filename stays `010-scope-lock.md` / `010_scope_lock.py` — the word "lock" is in the file path for stable cross-version references, even though the rule's *content* calls it "Active Scope Sentinel." Future renames are off the table; the file paths are now ABI.
+
+### Still deferred
+
+- Real `gh` mock for completion-gate `main()` (still using `--pr-json`).
+- Operator-authored scope (issue #10 from v0.2.0 review).
+- Level-3 filesystem permissions / scoped container helpers.
+
 ## [0.5.0] — 2026-05-12
 
 Active Scope Sentinel — repo-native detection + poison-pill semantics for mid-session scope drift. Driven by a reviewer push to make drift visible in conversation, not just at PR time.

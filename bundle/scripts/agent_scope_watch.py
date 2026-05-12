@@ -127,14 +127,40 @@ def _invoke_status(task_id: str | None, write_drift: bool, quiet: bool) -> int:
     return result.returncode
 
 
+def _read_config_interval() -> float:
+    """Read scope_enforcement.watch_interval_seconds from config, defaulting
+    to 1.0. Best-effort: falls back to default on any error."""
+    try:
+        repo = _repo_root()
+        cfg_path = repo / ".agent" / "coding-rails.config.yml"
+        if not cfg_path.is_file():
+            return 1.0
+        import yaml  # type: ignore
+        loaded = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+        section = loaded.get("scope_enforcement") or {}
+        val = section.get("watch_interval_seconds", 1.0)
+        return float(val)
+    except Exception:
+        return 1.0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--task-id", default=None)
-    parser.add_argument("--interval", type=float, default=1.0)
+    parser.add_argument(
+        "--interval",
+        type=float,
+        default=None,
+        help="Polling interval (seconds). Default from "
+        "scope_enforcement.watch_interval_seconds in config (1.0 if absent).",
+    )
     parser.add_argument("--fail-on-drift", action="store_true")
     parser.add_argument("--once", action="store_true")
     parser.add_argument("--quiet", action="store_true")
     args = parser.parse_args()
+
+    if args.interval is None:
+        args.interval = _read_config_interval()
 
     task_id = _resolve_task_id(args.task_id)
 
