@@ -1,0 +1,15 @@
+* text=auto eol=lf
+
+# These run on Linux; force LF regardless of operator platform.
+*.sh text eol=lf
+*.py text eol=lf
+.githooks/* text eol=lf
+bundle/hooks/* text eol=lf
+bundle/scripts/** text eol=lf
+
+# Markdown and config can be platform-natural for editing convenience,
+# but normalize to LF in the repo for consistent diffs.
+*.md text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.json text eol=lf

@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+# coding-rails pre-commit hook
+#
+# Invokes every rule check script under scripts/coding-rails/rules/ and
+# aggregates their results. Exits non-zero if any rule fails.
+#
+# This hook fires for every commit, on every branch, regardless of which
+# coding harness (Claude Code, Codex, Cline, browser, human) is driving.
+#
+# NOTE: this hook intentionally does NOT print bypass instructions
+# (no --no-verify hint, no OPERATOR_BYPASS=1 hint). If you need to skip
+# checks, do so explicitly and document why in the task ledger.
+
+set -uo pipefail
+
+REPO="$(git rev-parse --show-toplevel)"
+RULES_DIR="${REPO}/scripts/coding-rails/rules"
+LEDGER_DIR="${REPO}/.agent"
+
+# If the bundle has not been installed (no rules dir) bail quietly so we
+# don't break repos where pre-commit was wired manually.
+if [ ! -d "${RULES_DIR}" ]; then
+  exit 0
+fi
+
+failed=0
+for check in "${RULES_DIR}"/*.py; do
+  [ -f "${check}" ] || continue
+  if ! python3 "${check}"; then
+    failed=1
+  fi
+done
+
+# Drop a marker so post-commit can prove pre-commit actually ran.
+# Read by post-commit to detect --no-verify bypass at push time.
+if [ "${failed}" -eq 0 ]; then
+  mkdir -p "${LEDGER_DIR}/precommit-markers" 2>/dev/null || true
+  touch "${LEDGER_DIR}/precommit-markers/pending" 2>/dev/null || true
+fi
+
+if [ "${failed}" -ne 0 ]; then
+  echo "" >&2
+  echo "Pre-commit blocked. Fix the rule violations above, restage, and retry." >&2
+  exit 1
+fi
+
+exit 0

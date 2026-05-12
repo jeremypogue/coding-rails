@@ -1,0 +1,33 @@
+# CLAUDE.md — Claude Code entry pointer
+
+**You are Claude Code operating in this repository.** This file is your entry pointer to the rule set. Read `.agent/rules/index.md` first, then every numbered file in that directory, before any work.
+
+Identical content to `AGENTS.md` (which Codex auto-loads) and `.clinerules/` (which Cline auto-loads). The rules themselves are provider-neutral and live under `.agent/rules/`.
+
+## Mandatory at session start
+
+1. Read `.agent/rules/index.md`.
+2. Read every numbered rule file.
+3. Do not begin any file edit, code change, commit, or push until you have.
+
+## Mandatory before any code change
+
+- Run `scripts/coding-rails/agent_start_task.sh <task-id> --paths <list>` to create your task ledger.
+- The pre-commit hook will reject staged files outside `allowed_paths`.
+
+## Mandatory at task completion
+
+- Run `scripts/coding-rails/agent_finish_task.sh` — runs checks, pushes, opens PR.
+- Do not push to `main`. Do not force-push. Do not push to shared branches. Do not use `--no-verify`.
+
+## Enforcement layers
+
+| Layer | Mechanism |
+|---|---|
+| Local | `.githooks/pre-commit` and `.githooks/pre-push` |
+| CI | `.github/workflows/agent-task-gates.yml`, `.github/workflows/agent-rules-check.yml` |
+| GitHub | branch protection on `main` (PR required, status checks required, no force push, no deletion, CODEOWNERS review) |
+
+---
+
+*This file is a pointer, not the rules. The actual rules live in `.agent/rules/`. Do not duplicate content here.*

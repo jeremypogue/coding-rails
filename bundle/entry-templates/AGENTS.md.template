@@ -1,0 +1,35 @@
+# AGENTS.md — coding-agent entry pointer
+
+**You are a coding agent operating in this repository.** Before you make any file edit, code change, commit, or push, read every numbered file under `.agent/rules/`. They are short. The failure modes they prevent have already happened in this workspace.
+
+## Mandatory at session start
+
+1. Read `.agent/rules/index.md` first — the rule index.
+2. Read every numbered rule file (`001-*.md`, `004-*.md`, `008-*.md`, ...). All of them. Do not skim.
+3. If you find yourself thinking "I'll come back to read those later" — stop. Read them now.
+
+## Mandatory before any code change
+
+- Create a task ledger via `scripts/coding-rails/agent_start_task.sh <task-id> --paths <list>`. This produces `.agent/tasks/<task-id>.json` recording the branch, base SHA, and the explicit `allowed_paths` for your work.
+- Your commits will be rejected by the pre-commit hook if any staged file falls outside `allowed_paths`.
+
+## Mandatory at task completion
+
+- Run `scripts/coding-rails/agent_finish_task.sh` — runs checks, pushes the agent branch, opens the PR with required body sections, and waits for operator review.
+- Do not push directly to `main`, do not force-push, do not push to shared branches (`path-a-*`, `stage-*`, `claude-*`, `codex/*`, `feature/*`).
+- Do not use `--no-verify`. Do not set `OPERATOR_BYPASS` env vars. Both are detected; commits made this way will not pass the push gate.
+
+## How rules are enforced
+
+- **Pre-commit hook** — checks every rule against your staged diff. Bypass via `--no-verify` is logged and surfaced at push.
+- **Pre-push hook** — refuses pushes to shared branches, force pushes, and merge commits in the pushed range.
+- **GitHub Actions** — validates PR body sections, allowed-paths compliance, branch shape, and negative-smoke transcript before merge.
+- **GitHub branch protection** — main requires PR + CODEOWNERS review + passing status checks. Force pushes and deletions are disabled.
+
+## The principle
+
+Every guardrail in this repo exists because an agent already broke it. The rules under `.agent/rules/` are not advisory — they are the audit trail of past failure modes. Read them. Apply them. If you find one that contradicts your work, stop and ask the operator.
+
+---
+
+*This file is a pointer, not the rules. The actual rules live in `.agent/rules/`. Do not duplicate content here.*
