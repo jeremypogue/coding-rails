@@ -90,6 +90,67 @@ if ! git diff --quiet || ! git diff --cached --quiet; then
   exit 2
 fi
 
+# ---- drift-record check (rule 010) ----
+drift_path="${REPO}/.agent/drift/${task_id}.json"
+if [ -f "${drift_path}" ]; then
+  drift_status="$(python3 -c "
+import json, sys
+try:
+    print(json.load(open('${drift_path}', encoding='utf-8')).get('status', 'unresolved'))
+except Exception:
+    print('unresolved')
+" 2>/dev/null)"
+  if [ "${drift_status}" != "resolved" ]; then
+    fail "unresolved drift record at ${drift_path#${REPO}/}"
+    fail "  Rule 010 refuses to finish a task while drift is unresolved."
+    fail "  Operator must:"
+    fail "    1. revert unauthorized changes + delete drift file, OR"
+    fail "    2. expand allowed_paths + update scope lock + mark drift resolved, OR"
+    fail "    3. abort task (mark ledger status: superseded)."
+    fail "  See .agent/rules/010-scope-lock.md."
+    exit 9
+  fi
+fi
+
+# ---- heartbeat-staleness check (rule 010) ----
+# If the scope watcher's heartbeat is missing or older than the configured
+# threshold (default 60s), refuse to finish. A dead watcher means drift
+# detection was OFF; we can't certify scope was monitored across the
+# session. Operator can override by deleting the heartbeat file (formally
+# attesting they verified scope manually) and re-running.
+heartbeat_path="${REPO}/.agent/state/${task_id}.heartbeat"
+max_heartbeat_age="${CODING_RAILS_MAX_HEARTBEAT_AGE:-60}"
+if [ ! -f "${heartbeat_path}" ]; then
+  fail "no scope-watcher heartbeat at ${heartbeat_path#${REPO}/}"
+  fail "  Rule 010 expects agent_scope_watch.py to have run during this task."
+  fail "  Either run the watcher and retry:"
+  fail "    ./scripts/coding-rails/agent_scope_watch.py --once"
+  fail "  Or, if you ran the watcher elsewhere and verified scope manually,"
+  fail "  set CODING_RAILS_SKIP_HEARTBEAT=1 to bypass (operator-only)."
+  if [ "${CODING_RAILS_SKIP_HEARTBEAT:-0}" != "1" ]; then
+    exit 10
+  fi
+else
+  hb_age="$(python3 -c "
+import datetime as dt, json
+try:
+    data = json.load(open(r'${heartbeat_path}', encoding='utf-8'))
+    ts = data.get('updated_at', '').rstrip('Z')
+    when = dt.datetime.fromisoformat(ts)
+    print(int((dt.datetime.utcnow() - when).total_seconds()))
+except Exception:
+    print(-1)
+" 2>/dev/null)"
+  if [ "${hb_age}" -lt 0 ] || [ "${hb_age}" -gt "${max_heartbeat_age}" ]; then
+    fail "scope-watcher heartbeat is stale (${hb_age}s old; max ${max_heartbeat_age}s)"
+    fail "  Refresh it by running the scope check once:"
+    fail "    ./scripts/coding-rails/agent_scope_watch.py --once"
+    if [ "${CODING_RAILS_SKIP_HEARTBEAT:-0}" != "1" ]; then
+      exit 10
+    fi
+  fi
+fi
+
 # ---- conflict-marker scan in committed files ----
 echo ""
 echo "Scanning for conflict markers in committed range..."

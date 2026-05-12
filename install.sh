@@ -183,6 +183,26 @@ self-audits/
 AGENT_IGNORE_EOF
   say "+ .agent/.gitignore (runtime artifacts)"
 
+  # Rule 010 directories — scope locks ARE tracked (operator audit
+  # trail); drift records ARE NOT tracked by default (per-machine
+  # session state). Operators may commit a drift record explicitly
+  # when documenting a resolution path.
+  mkdir -p "${TARGET}/.agent/scope"
+  if [ ! -f "${TARGET}/.agent/scope/.gitkeep" ]; then
+    : > "${TARGET}/.agent/scope/.gitkeep"
+  fi
+  say "+ .agent/scope/ (scope locks — tracked per task)"
+
+  mkdir -p "${TARGET}/.agent/drift"
+  cat > "${TARGET}/.agent/drift/.gitignore" <<'DRIFT_IGNORE_EOF'
+# Per-session drift records. Not tracked by default; operators may
+# commit individual records when documenting a resolution. To track
+# a specific drift record explicitly: `git add -f <task_id>.json`.
+*.json
+!.gitignore
+DRIFT_IGNORE_EOF
+  say "+ .agent/drift/.gitignore (drift records — per-machine by default)"
+
   # ensure hook files are executable
   find "${TARGET}/.githooks" -type f -exec chmod +x {} \; 2>/dev/null || true
   find "${TARGET}/scripts/coding-rails" -type f \( -name '*.sh' -o -name '*.py' \) -exec chmod +x {} \; 2>/dev/null || true

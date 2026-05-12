@@ -55,9 +55,11 @@ def tmp_repo(tmp_path: Path) -> Path:
     for top_script in SCRIPTS.glob("*.py"):
         shutil.copy(top_script, target_scripts / top_script.name)
 
-    # Establish initial main commit so branches have a base
+    # Establish initial main commit so branches have a base. Commit the
+    # bundle scripts too so they show as tracked, not untracked — otherwise
+    # rule 010 / agent_scope_status would flag them as out-of-scope.
     (repo / "README.md").write_text("# test\n")
-    _git(repo, "add", "README.md")
+    _git(repo, "add", "README.md", "scripts")
     _git(repo, "commit", "-m", "initial")
 
     return repo

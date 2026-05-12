@@ -17,7 +17,10 @@ required agent workflow:
      phrase ('verified', 'shipped', 'confirmed', 'tested', 'smoked')
      also contains at least one evidence reference.
   9. If allowed_paths was modified by this PR, the new list is a
-     subset of the base's list (no agent-driven scope expansion).
+     subset of the base's list (or the first-in-PR ledger's list when
+     the PR creates the ledger). No agent-driven scope expansion.
+  10. No unresolved drift record (`.agent/drift/<task_id>.json` with
+      `status: unresolved`) is present in the PR — rule 010.
 
 NOTE: The "negative-smoke" section is checked for presence and
 non-empty content only. Semantic verification that the transcript
@@ -506,13 +509,21 @@ def main() -> int:
     if not check_pr_body(body):
         all_ok = False
 
-    # 4. allowed_paths (with bookkeeping auto-allow — mirrors rule 001)
+    # 4. allowed_paths (with bookkeeping auto-allow — mirrors rule 001
+    #    + rule 010 plumbing)
     allowed = ledger_data.get("allowed_paths") or []
     bookkeeping: set[str] = {".agent/test-coverage-exceptions.md"}
     if ledger_path is not None:
         bookkeeping.add(
             str(ledger_path.relative_to(repo_root)).replace("\\", "/")
         )
+    # Rule 010 plumbing: scope lock + drift record for the current task
+    # are auto-allowed bookkeeping. Operators may commit drift records
+    # when documenting resolution; scope locks are written by start_task.
+    task_id_for_bk = ledger_data.get("task_id")
+    if task_id_for_bk:
+        bookkeeping.add(f".agent/scope/{task_id_for_bk}.lock")
+        bookkeeping.add(f".agent/drift/{task_id_for_bk}.json")
     if allowed:
         if not check_allowed_paths(changed, allowed, bookkeeping):
             all_ok = False
@@ -546,6 +557,35 @@ def main() -> int:
             repo_root, rel, base_sha, head_sha
         ):
             all_ok = False
+
+    # 10. drift-record check (rule 010)
+    if ledger_data:
+        task_id = ledger_data.get("task_id")
+        if task_id:
+            drift_path = repo_root / ".agent" / "drift" / f"{task_id}.json"
+            if drift_path.is_file():
+                try:
+                    drift = json.loads(drift_path.read_text(encoding="utf-8"))
+                except (json.JSONDecodeError, OSError):
+                    drift = {"status": "unresolved", "_unreadable": True}
+                if drift.get("status") != "resolved":
+                    fail(
+                        "unresolved drift record (rule 010) at "
+                        f"{drift_path.relative_to(repo_root)}"
+                    )
+                    unauthorized = drift.get("unauthorized_paths") or []
+                    if unauthorized:
+                        sys.stderr.write(
+                            "  unauthorized paths recorded during session:\n"
+                        )
+                        for p in unauthorized:
+                            sys.stderr.write(f"    {p}\n")
+                    sys.stderr.write(
+                        "  Operator must resolve before merge (revert + "
+                        "delete drift file, or expand ledger and mark drift "
+                        "resolved). See .agent/rules/010-scope-lock.md.\n"
+                    )
+                    all_ok = False
 
     if all_ok:
         print("\ncompletion gate: PASS")

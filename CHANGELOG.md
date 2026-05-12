@@ -2,6 +2,56 @@
 
 All notable changes to coding-rails are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Semver.
 
+## [0.5.0] — 2026-05-12
+
+Active Scope Sentinel — repo-native detection + poison-pill semantics for mid-session scope drift. Driven by a reviewer push to make drift visible in conversation, not just at PR time.
+
+### Added
+
+- **New rule 010 — Active Scope Sentinel** (`bundle/rules/010-scope-lock.md`). Once a task starts, `allowed_paths` are frozen; any change outside them is **drift**; the first drift detected **poisons the task** and no downstream layer (commit, push, finish, CI gate) can proceed until the operator resolves it. Documented honestly: detection + poison-pill, not OS-level prevention.
+- **`bundle/scripts/agent_scope_check.py`** — one-shot scope status check. Reports clean/drift, optionally writes a drift record. (Renamed from `agent_scope_status.py`.)
+- **`bundle/scripts/agent_scope_watch.py`** — polling watcher (default 1s) that writes drift records on detection AND emits a heartbeat to `.agent/state/<task_id>.heartbeat` every cycle.
+- **`bundle/scripts/agent_checkpoint.py`** — single-line CLEAN/DRIFT/NO-TASK/NO-WATCHER status the agent prints after every file-changing turn. Cheap (<100ms). Designed to be cited in the agent's response so operators see scope state mid-conversation.
+- **`bundle/scripts/rules/010_scope_lock.py`** — pre-commit-side check: refuses commit if unresolved drift exists for the current task OR if the ledger's `allowed_paths` hash no longer matches the frozen scope lock.
+- **`.agent/scope/<task_id>.lock`** — written at task start by `agent_start_task.sh`, contains the frozen allowed_paths + sha256 scope hash + lock timestamp. Tracked.
+- **`.agent/drift/<task_id>.json`** — written by the watcher / scope-check on detection. Status: `unresolved` | `resolved`. Per-machine; gitignored by default; operator may commit explicitly when documenting resolution.
+- **`.agent/state/<task_id>.heartbeat`** — written by the watcher on every poll. Used by `agent_finish_task.sh` to refuse if the watcher wasn't running.
+
+### Changed
+
+- **`agent_start_task.sh`** now writes the scope lock at task start.
+- **`agent_finish_task.sh`** now refuses if (a) an unresolved drift record exists OR (b) the watcher heartbeat is missing or older than `CODING_RAILS_MAX_HEARTBEAT_AGE` seconds (default 60s). Operator override via `CODING_RAILS_SKIP_HEARTBEAT=1`.
+- **`bundle/hooks/pre-push`** now refuses pushes from an agent branch whose task has an unresolved drift record. Closes the window where a commit made *before* drift was detected could still push *after* drift was recorded.
+- **`bundle/scripts/agent_completion_gate.py`** gains a rule-010 drift-record check. CI refuses PRs that contain an unresolved drift record. The gate's `bookkeeping` set now also covers `.agent/scope/<task_id>.lock` and `.agent/drift/<task_id>.json` so operators can commit those without out-of-scope errors.
+- **`install.sh`** provisions `.agent/scope/` (tracked) and `.agent/drift/` (gitignored by default) on install/upgrade.
+- **README + rule index** updated for rule 010.
+- **`coding-rails.config.example.yml`** gains a `scope_enforcement` section: watch interval, fail-on-drift, require-clean-scope-before-finish, additional bookkeeping path globs.
+
+### Honest framing (in the rule itself)
+
+Rule 010 explicitly says what it does NOT promise:
+- It does NOT prevent the file write — only OS / container / sandbox can.
+- It detects drift within ~1s and makes it structurally fatal to the task.
+- An agent operating in bad faith (kill watcher + delete drift record + silence heartbeat) is out of scope for this rule. The answer there is OS-level isolation (separate UID, ACLs, scoped container), which the bundle does not ship.
+
+For private personal repos with no GitHub branch protection, credential separation is the final gate: the agent does not push; the operator runs `git push` after the bundle reports clean.
+
+### Self-test counts
+
+- v0.4.0: 158 + 1 skipped
+- **v0.5.0: 180 + 1 skipped** (+22 net for v0.5.0; tests for rule 010 / scope_check / checkpoint / heartbeat / drift-blocks-completion-gate)
+
+### Naming notes
+
+- Rule numbered **010**, not 002. The bundle's existing ships are 001/004/008; project-specific extensions (like agent-mesh-v2's 002 dashboard rule) sit in the 1–9 range. Putting a portable bundle rule at 002 would clobber projects that already use that number.
+- Markdown still lives at `bundle/rules/010-scope-lock.md` and check script at `bundle/scripts/rules/010_scope_lock.py`. The filename retains "scope-lock" for stable cross-version references; the rule's *content* and the bundle's framing call it "Active Scope Sentinel" to be honest about what it actually does.
+
+### Still deferred
+
+- **Level-3 filesystem permissions** (ACL / scoped container). Operator-controlled OS config; bundle doesn't ship. Rule 010's drift detection works alongside Level-3 setups.
+- **Real `gh` mock** (cleaner than `--pr-json` in v0.4.0).
+- **Operator-authored scope** (still from v0.2.0 review).
+
 ## [0.4.0] — 2026-05-12
 
 Driven by a third external review of v0.3.0. Four remaining consistency / coverage gaps closed.
