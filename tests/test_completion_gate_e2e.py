@@ -381,6 +381,96 @@ def test_gate_fails_when_pr_creates_then_expands_ledger(tmp_path):
     assert "expand" in (result.stdout + result.stderr).lower() or "scope" in (result.stdout + result.stderr).lower()
 
 
+def test_gate_blocks_on_unresolved_drift_record(tmp_path):
+    """REGRESSION (rule 010): an unresolved drift record committed in
+    the PR blocks the completion gate at CI time."""
+    repo = _init_test_repo(tmp_path)
+    base_sha = _git(repo, "rev-parse", "HEAD").stdout.strip()
+    branch = "agent/claude/20260512-test"
+    _git(repo, "checkout", "-b", branch)
+    ledger = _write_ledger(
+        repo, "20260512-test", branch, ["src/foo.py"], base_sha
+    )
+    (repo / "src").mkdir()
+    (repo / "src" / "foo.py").write_text("x", encoding="utf-8")
+
+    # Plant an unresolved drift record
+    drift_dir = repo / ".agent" / "drift"
+    drift_dir.mkdir(parents=True)
+    drift_path = drift_dir / "20260512-test.json"
+    drift_path.write_text(
+        json.dumps(
+            {
+                "task_id": "20260512-test",
+                "branch": branch,
+                "detected_at": "2026-05-12T12:00:00Z",
+                "unauthorized_paths": ["leaked.py"],
+                "status": "unresolved",
+            }
+        )
+    )
+
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-m", "x")
+    head_sha = _git(repo, "rev-parse", "HEAD").stdout.strip()
+    pr = _write_pr_json(
+        tmp_path,
+        branch=branch,
+        base_sha=base_sha,
+        head_sha=head_sha,
+        files=[
+            "src/foo.py",
+            ".agent/tasks/20260512-test.json",
+            ".agent/drift/20260512-test.json",
+        ],
+    )
+    result = _run_gate(repo, pr)
+    assert result.returncode != 0
+    err = (result.stdout + result.stderr).lower()
+    assert "drift" in err or "010" in err
+
+
+def test_gate_passes_with_resolved_drift_record(tmp_path):
+    """If the drift record is marked resolved, the gate doesn't block."""
+    repo = _init_test_repo(tmp_path)
+    base_sha = _git(repo, "rev-parse", "HEAD").stdout.strip()
+    branch = "agent/claude/20260512-test"
+    _git(repo, "checkout", "-b", branch)
+    ledger = _write_ledger(
+        repo, "20260512-test", branch, ["src/foo.py"], base_sha
+    )
+    (repo / "src").mkdir()
+    (repo / "src" / "foo.py").write_text("x", encoding="utf-8")
+
+    drift_dir = repo / ".agent" / "drift"
+    drift_dir.mkdir(parents=True)
+    (drift_dir / "20260512-test.json").write_text(
+        json.dumps({
+            "task_id": "20260512-test",
+            "branch": branch,
+            "status": "resolved",
+            "unauthorized_paths": ["was-evil.py"],
+        })
+    )
+
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-m", "x")
+    head_sha = _git(repo, "rev-parse", "HEAD").stdout.strip()
+    pr = _write_pr_json(
+        tmp_path,
+        branch=branch,
+        base_sha=base_sha,
+        head_sha=head_sha,
+        files=[
+            "src/foo.py",
+            ".agent/tasks/20260512-test.json",
+            ".agent/drift/20260512-test.json",
+        ],
+    )
+    result = _run_gate(repo, pr)
+    assert result.returncode == 0, f"unexpected fail:\n{result.stdout}\n{result.stderr}"
+
+
 def test_gate_passes_when_pr_creates_ledger_and_no_growth(tmp_path):
     """Baseline for the test above: creating a ledger without expanding
     it should pass."""

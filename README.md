@@ -33,16 +33,20 @@ Coding agents (Claude Code, Codex, Cline, etc.) running in parallel sessions, wi
 │   ├── agent-task-gates.yml    ← PR body, scope, branch shape, base_sha, scope-growth, commit-msg evidence
 │   └── agent-rules-check.yml   ← per-rule check matrix
 ├── scripts/coding-rails/
-│   ├── agent_start_task.sh     ← creates task metadata + branch
-│   ├── agent_finish_task.sh    ← runs rules against base_ref..HEAD + pushes + opens PR
+│   ├── agent_start_task.sh     ← creates task metadata + branch + scope lock
+│   ├── agent_finish_task.sh    ← runs rules against base_ref..HEAD + pushes + opens PR; refuses on unresolved drift
 │   ├── agent_completion_gate.py
+│   ├── agent_scope_watch.py    ← live polling watcher (rule 010)
+│   ├── agent_scope_status.py   ← one-shot scope status check (rule 010)
 │   ├── agent_bash_guard.sh     ← best-effort BASH_ENV destructive-git guard
 │   ├── agent_git_guard.py
+│   ├── _evidence_lib.py        ← shared rule 008 logic (commit-msg + CI gate)
 │   ├── precommit_self_audit.sh
 │   └── rules/                  ← one check per rule
 │       ├── 001_task_ledger.py
 │       ├── 004_test_coverage.py
-│       └── 008_evidence_required.py
+│       ├── 008_evidence_required.py
+│       └── 010_scope_lock.py
 ├── AGENTS.md                   ← entry pointer for Codex (copied only if absent)
 ├── CLAUDE.md                   ← entry pointer for Claude Code (copied only if absent)
 └── .clinerules/                ← entry pointer for Cline (copied only if absent)
@@ -99,8 +103,9 @@ After install:
 | Scope growth | PR cannot expand `allowed_paths` in its own ledger | `agent_completion_gate.py` | CI |
 | PR completion | task ends as PR; PR body has required sections | `agent_completion_gate.py` | CI |
 | Self-tests | the bundle's bash + Python scripts have integration tests | `tests/` + `.github/workflows/ci.yml` | CI on every push/PR to coding-rails main |
+| 010 Active scope lock | task allowed_paths frozen at start; drift detected mid-session via polling watcher; drift record blocks every downstream layer until operator resolves | `scripts/coding-rails/rules/010_scope_lock.py` + `agent_scope_watch.py` + `agent_scope_status.py` | live (1s poll) + pre-commit + finish_task + CI completion gate |
 
-Coming next: deeper CI for hook chain edge cases (force-push refusal via real git push); fuller workplace-rule set as opt-in extensions. Helper-level unit tests for `agent_completion_gate.py` exist (v0.3.0 added 13); end-to-end `main()` coverage via `--pr-json` testing mode exists (v0.4.0); real-CI integration coverage comes from PR runs against installed targets.
+Coming next: optional Level-3 filesystem scope lock (ACL / scoped container helpers — operator must run agent under a non-owner UID for real teeth); fuller workplace-rule set as opt-in extensions.
 
 ## Why "coding-rails" and not "agent-rails"
 

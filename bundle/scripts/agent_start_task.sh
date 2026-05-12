@@ -157,6 +157,35 @@ EOF
 
 echo ""
 echo "+ ${LEDGER#${REPO}/}"
+
+# ---- write scope lock (rule 010) ----
+# Freeze the allowed_paths set at task start. The scope lock is used by
+# rule 010 to detect mid-task expansion of the ledger.
+scope_dir="${REPO}/.agent/scope"
+mkdir -p "${scope_dir}"
+scope_lock_path="${scope_dir}/${TASK_ID}.lock"
+
+scope_hash="$(printf '%s' "${paths_json}" | python3 -c '
+import hashlib, json, sys
+paths = sorted(json.loads(sys.stdin.read()))
+canonical = "\n".join(paths)
+print("sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest())
+')"
+
+cat >"${scope_lock_path}" <<EOF
+{
+  "task_id": "${TASK_ID}",
+  "branch": "${BRANCH}",
+  "allowed_paths": ${paths_json},
+  "scope_hash": "${scope_hash}",
+  "locked_at": "${started_at}"
+}
+EOF
+echo "+ ${scope_lock_path#${REPO}/}  (scope hash: ${scope_hash:7:12}...)"
+
 echo ""
 echo "Ready. Make your changes, then:"
 echo "  ./scripts/coding-rails/agent_finish_task.sh"
+echo ""
+echo "Optional: run the scope watcher alongside your session:"
+echo "  ./scripts/coding-rails/agent_scope_watch.py &"

@@ -46,3 +46,24 @@ evidence_patterns:
   - "(?i)physical-check:\\s*\\S+"                    # physical observation
   - "(?i)event_log:\\s*\\S+"                         # mesh event log reference
   - "(?i)\\.agent/tasks/\\S+\\.json"                 # task ledger reference
+
+
+# ---- rule 010 — active scope lock ----
+scope_enforcement:
+  enabled: true                  # default true. Set to false to skip rule 010
+                                 # entirely (the rule script will silently exit 0).
+  watch_interval_seconds: 1.0    # polling rate for agent_scope_watch.py
+  fail_on_drift: true            # agent_scope_watch.py exits non-zero on first
+                                 # drift detection (in addition to writing the
+                                 # record). Useful for CI / supervisor scripts.
+  require_clean_scope_before_finish: true
+                                 # agent_finish_task.sh refuses if .agent/drift/
+                                 # contains an unresolved record for this task.
+                                 # Set to false ONLY if you want operator-
+                                 # discipline as the floor (not recommended).
+  bookkeeping_paths: []          # additional bookkeeping paths beyond the
+                                 # built-in set (.agent/state/, .agent/precommit-
+                                 # markers/, the ledger itself, the scope lock).
+                                 # Use glob patterns. Examples:
+                                 #   - "docs/*.md"
+                                 #   - ".vscode/*"

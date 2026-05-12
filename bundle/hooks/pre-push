@@ -81,6 +81,53 @@ while IFS=' ' read -r local_ref local_sha remote_ref remote_sha; do
     continue
   fi
 
+  # ---- drift-record block (rule 010) ----
+  # If the current agent branch has an unresolved drift record, refuse
+  # the push. A commit made BEFORE drift was detected could otherwise
+  # be pushed after drift was recorded — this closes that window.
+  current_branch_for_drift="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo)"
+  if [[ "${current_branch_for_drift}" == agent/* ]]; then
+    task_id_for_drift=""
+    for ledger_file in "${REPO}"/.agent/tasks/*.json; do
+      [ -f "${ledger_file}" ] || continue
+      lbranch="$(python3 -c "
+import json
+try:
+    print(json.load(open(r'${ledger_file}', encoding='utf-8')).get('branch', ''))
+except Exception:
+    print('')
+" 2>/dev/null)"
+      if [ "${lbranch}" = "${current_branch_for_drift}" ]; then
+        task_id_for_drift="$(python3 -c "
+import json
+print(json.load(open(r'${ledger_file}', encoding='utf-8')).get('task_id', ''))
+" 2>/dev/null)"
+        break
+      fi
+    done
+
+    if [ -n "${task_id_for_drift}" ]; then
+      drift_file="${REPO}/.agent/drift/${task_id_for_drift}.json"
+      if [ -f "${drift_file}" ]; then
+        drift_status="$(python3 -c "
+import json
+try:
+    print(json.load(open(r'${drift_file}', encoding='utf-8')).get('status', 'unresolved'))
+except Exception:
+    print('unresolved')
+" 2>/dev/null)"
+        if [ "${drift_status}" != "resolved" ]; then
+          fail "unresolved scope drift (rule 010) for task ${task_id_for_drift}"
+          fail "  See ${drift_file#${REPO}/}"
+          fail "  Resolve via revert + delete, or operator expansion of"
+          fail "  allowed_paths + mark drift status: resolved."
+          failed=1
+          continue
+        fi
+      fi
+    fi
+  fi
+
   # ---- agent-branch shape check (only enforced when current branch
   #      looks like an agent branch; lets the operator's own feature
   #      branches through) ----

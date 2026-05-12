@@ -11,8 +11,9 @@ The harness entry files (`AGENTS.md`, `CLAUDE.md`, `.clinerules/`, `.cursorrules
 1. [`001-task-ledger.md`](./001-task-ledger.md) — every change has a restart-survivable task ledger entry.
 2. [`004-test-coverage.md`](./004-test-coverage.md) — code change + test change in the same commit.
 3. [`008-evidence-required.md`](./008-evidence-required.md) — "verified" / "shipped" claims require evidence references.
+4. [`010-scope-lock.md`](./010-scope-lock.md) — task scope is frozen at start; out-of-scope edits trigger drift records that block commit/push/finish/CI until the operator resolves.
 
-> The bundle ships three rules. Numbers 002, 003, 005, 006, 007, 009 are intentionally unallocated — projects that consume this bundle may add their own numbered rule files under `.agent/rules/` alongside the bundle's, and add matching check scripts under `scripts/coding-rails/rules/`. The pre-commit and PR-completion-gate aggregators discover all `*.py` rule scripts at runtime, so project-defined rules fire automatically once dropped in.
+> The bundle ships four rules. Numbers 002, 003, 005, 006, 007, 009 are intentionally unallocated — projects that consume this bundle may add their own numbered rule files under `.agent/rules/` alongside the bundle's, and add matching check scripts under `scripts/coding-rails/rules/`. The pre-commit and PR-completion-gate aggregators discover all `*.py` rule scripts at runtime, so project-defined rules fire automatically once dropped in.
 
 ## How these rules are enforced
 
