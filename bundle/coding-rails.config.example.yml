@@ -1,0 +1,48 @@
+# coding-rails per-project configuration
+#
+# Copy this file to .agent/coding-rails.config.yml in the target repo
+# to override the bundle defaults. The check scripts read this file at
+# runtime; absence falls back to sensible defaults.
+
+# ---- rule 004 — test coverage ----
+# Files matching this glob require a paired test file to be staged in
+# the same commit. Defaults to "agents/*.py" (the v2 / mesh layout).
+# Examples:
+#   "src/handlers/*.py"  for a Flask app
+#   "lib/**/*.ts"        for a TS library
+agent_surface_glob: "agents/*.py"
+
+# Test path template. {name} is the stem of the source file. Default:
+#   "tests/test_{name}.py"
+# Examples:
+#   "tests/{name}.test.ts"
+#   "__tests__/{name}.test.js"
+test_path_template: "tests/test_{name}.py"
+
+# Files matching these patterns are excluded from the paired-test
+# requirement (e.g. __init__.py, generated files).
+exclude_patterns:
+  - "agents/__init__.py"
+  - "agents/_*.py"
+
+# ---- rule 008 — evidence required for completion claims ----
+# If a commit message matches ANY completion pattern AND no evidence
+# pattern is present, the commit is rejected.
+completion_patterns:
+  - "(?i)\\bverified\\b"
+  - "(?i)\\bshipped\\b"
+  - "(?i)\\bconfirmed\\b"
+  - "(?i)\\btested\\b"
+  - "(?i)\\bsmoked?\\b"
+
+evidence_patterns:
+  - "(?i)https?://"                                  # any URL
+  - "(?i)evidence:\\s*\\S{10,}"                      # "evidence: <≥10 char ref>"
+  - "(?i)pytest\\b.*\\bpassed\\b"                    # test invocation + result
+  - "(?i)screenshot:\\s*\\S+"                        # screenshot reference
+  - "(?i)logbook:\\s*\\S+"                           # logbook entry
+  - "(?i)telegram:\\s*\\S+"                          # telegram message
+  - "(?i)sms:\\s*\\S+"                               # SMS message
+  - "(?i)physical-check:\\s*\\S+"                    # physical observation
+  - "(?i)event_log:\\s*\\S+"                         # mesh event log reference
+  - "(?i)\\.agent/tasks/\\S+\\.json"                 # task ledger reference

@@ -1,0 +1,68 @@
+name: agent-rules-check
+
+# Run every coding-rails rule script against the PR diff. Each rule
+# script in scripts/coding-rails/rules/ is invoked; pass/fail is
+# aggregated.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches:
+      - main
+      - master
+      - develop
+  push:
+    branches:
+      - main
+      - master
+      - develop
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  rules-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyyaml || true
+
+      - name: Discover and run rule scripts
+        run: |
+          set +e
+          status=0
+          if [ ! -d scripts/coding-rails/rules ]; then
+            echo "No scripts/coding-rails/rules/ directory; nothing to check."
+            exit 0
+          fi
+          # Set up git diff between base and head, simulating the
+          # pre-commit "staged" state by staging the PR diff.
+          base_sha="${{ github.event.pull_request.base.sha }}"
+          head_sha="${{ github.event.pull_request.head.sha }}"
+          if [ -n "${base_sha}" ] && [ -n "${head_sha}" ]; then
+            git diff --name-only "${base_sha}..${head_sha}" | while read f; do
+              if [ -n "${f}" ] && [ -f "${f}" ]; then
+                git add "${f}" 2>/dev/null || true
+              fi
+            done
+          fi
+          for check in scripts/coding-rails/rules/*.py; do
+            [ -f "${check}" ] || continue
+            echo ""
+            echo "== ${check} =="
+            python "${check}" || status=$?
+          done
+          exit ${status}

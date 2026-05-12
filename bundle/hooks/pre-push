@@ -1,0 +1,168 @@
+#!/usr/bin/env bash
+# coding-rails pre-push hook
+#
+# Refuses pushes that would land bad code:
+#   - to shared branches (main, master, develop, feature/*, claude-*, codex/*,
+#     stage-*, path-*, hotfix/*)
+#   - that are force pushes / non-fast-forward
+#   - that include merge commits in the pushed range
+#
+# Also detects --no-verify bypassed commits via the post-commit marker log
+# and blocks the push unless OPERATOR_REVIEWED_BYPASS=1 is set explicitly by
+# the operator (NOT printed in agent-facing output).
+#
+# This hook fires for every push, on every branch, regardless of which
+# coding harness (Claude Code, Codex, Cline, browser, human) is driving.
+#
+# Stdin: list of "<local_ref> <local_sha> <remote_ref> <remote_sha>" lines
+
+set -uo pipefail
+
+REPO="$(git rev-parse --show-toplevel)"
+LEDGER_DIR="${REPO}/.agent"
+PRECOMMIT_LOG="${LEDGER_DIR}/precommit.log"
+
+# Branches the operator owns. Agents may NEVER push directly to these.
+SHARED_BRANCH_PATTERNS=(
+  "refs/heads/main"
+  "refs/heads/master"
+  "refs/heads/develop"
+  "refs/heads/trunk"
+  "refs/heads/release/*"
+  "refs/heads/hotfix/*"
+  "refs/heads/feature/*"
+  "refs/heads/claude-*"
+  "refs/heads/codex/*"
+  "refs/heads/codex-*"
+  "refs/heads/cline-*"
+  "refs/heads/stage-*"
+  "refs/heads/path-*"
+)
+
+# Acceptable agent branch shape:
+#   agent/<tool>/<YYYYMMDD>-<slug>
+AGENT_BRANCH_RE='^refs/heads/agent/[a-z0-9_-]+/[0-9]{8}-[a-z0-9_-]+$'
+
+fail() {
+  printf '\npre-push: %s\n' "$*" >&2
+}
+
+block_match() {
+  local target="$1"
+  for pattern in "${SHARED_BRANCH_PATTERNS[@]}"; do
+    case "${target}" in
+      ${pattern}) return 0 ;;
+    esac
+  done
+  return 1
+}
+
+failed=0
+
+# Process each ref being pushed
+while IFS=' ' read -r local_ref local_sha remote_ref remote_sha; do
+  [ -z "${local_ref}" ] && continue
+  [ "${local_ref}" = "(delete)" ] && continue
+  # Skip deletions of the remote (we don't enforce on deletes; that's
+  # different behavior controlled by allow_deletions at the server)
+  if [ "${local_sha}" = "0000000000000000000000000000000000000000" ]; then
+    continue
+  fi
+
+  # ---- shared-branch block ----
+  if block_match "${remote_ref}"; then
+    fail "refusing to push to shared branch: ${remote_ref}"
+    fail "  Open a PR from a personal agent branch instead:"
+    fail "    git switch -c agent/<tool>/$(date +%Y%m%d)-<slug>"
+    failed=1
+    continue
+  fi
+
+  # ---- agent-branch shape check (only enforced when current branch
+  #      looks like an agent branch; lets the operator's own feature
+  #      branches through) ----
+  current_branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo)"
+  if [[ "${current_branch}" == agent/* ]]; then
+    if ! [[ "${remote_ref}" =~ ${AGENT_BRANCH_RE} ]]; then
+      fail "agent branch name does not match required shape:"
+      fail "    expected: agent/<tool>/<YYYYMMDD>-<slug>"
+      fail "    got:      ${remote_ref}"
+      failed=1
+      continue
+    fi
+  fi
+
+  # ---- non-fast-forward / force-push detection ----
+  if [ "${remote_sha}" != "0000000000000000000000000000000000000000" ]; then
+    # remote exists; check that local_sha contains remote_sha (i.e. FF)
+    if ! git merge-base --is-ancestor "${remote_sha}" "${local_sha}" 2>/dev/null; then
+      fail "refusing non-fast-forward push to ${remote_ref}"
+      fail "  Pull and rebase, do not force-push."
+      failed=1
+      continue
+    fi
+  fi
+
+  # ---- merge-commit detection in pushed range ----
+  if [ "${remote_sha}" = "0000000000000000000000000000000000000000" ]; then
+    # New branch: examine commits not reachable from any remote ref
+    range_args=("${local_sha}" "--not" "--remotes=origin")
+  else
+    # Existing branch: only new commits
+    range_args=("${remote_sha}..${local_sha}")
+  fi
+  merge_commits="$(git rev-list --merges "${range_args[@]}" 2>/dev/null || true)"
+  if [ -n "${merge_commits}" ]; then
+    fail "refusing push containing merge commit(s) in pushed range:"
+    while IFS= read -r sha; do
+      [ -z "${sha}" ] && continue
+      msg="$(git log --format=%s -n 1 "${sha}" 2>/dev/null || echo)"
+      fail "    ${sha}  ${msg}"
+    done <<<"${merge_commits}"
+    fail "  Rebase your branch so it is linear before pushing."
+    failed=1
+    continue
+  fi
+
+  # ---- bypassed-commit detection ----
+  # For each commit in the pushed range, look it up in the precommit log.
+  # Commits that are missing OR tagged bypass=likely-no-verify block the
+  # push unless OPERATOR_REVIEWED_BYPASS=1.
+  if [ -f "${PRECOMMIT_LOG}" ]; then
+    if [ "${remote_sha}" = "0000000000000000000000000000000000000000" ]; then
+      commits="$(git rev-list "${local_sha}" --not --remotes=origin 2>/dev/null || true)"
+    else
+      commits="$(git rev-list "${remote_sha}..${local_sha}" 2>/dev/null || true)"
+    fi
+    bypassed=()
+    while IFS= read -r sha; do
+      [ -z "${sha}" ] && continue
+      line="$(grep -F "sha=${sha}" "${PRECOMMIT_LOG}" 2>/dev/null | tail -1)"
+      if [ -z "${line}" ]; then
+        bypassed+=("${sha} (no precommit log entry — pre-commit hook did not run)")
+      elif echo "${line}" | grep -q "bypass=likely-no-verify"; then
+        bypassed+=("${sha} (--no-verify detected at commit time)")
+      fi
+    done <<<"${commits}"
+
+    if [ "${#bypassed[@]}" -gt 0 ]; then
+      if [ "${OPERATOR_REVIEWED_BYPASS:-0}" != "1" ]; then
+        fail "refusing push: commits in this range bypassed pre-commit"
+        for entry in "${bypassed[@]}"; do
+          fail "    ${entry}"
+        done
+        fail "  Operator must review the bypassed commits and re-push."
+        failed=1
+        continue
+      fi
+    fi
+  fi
+done
+
+if [ "${failed}" -ne 0 ]; then
+  fail ""
+  fail "Pre-push blocked. Fix the issues above and try again."
+  exit 1
+fi
+
+exit 0
