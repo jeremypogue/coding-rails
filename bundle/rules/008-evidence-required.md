@@ -57,8 +57,8 @@ evidence_patterns:
 
 ## Enforcement
 
-- **Pre-commit** — scans the commit message; if a completion phrase appears without a matching evidence pattern, the commit is rejected with a message naming the missing reference.
-- **PR completion gate (CI)** — re-runs the check against every commit in the PR range.
+- **Commit-msg hook** — runs when the commit message is finalized but before the commit object is created. If a completion phrase appears without a matching evidence pattern, the commit is rejected. Pre-commit cannot enforce this because the commit message does not exist yet at pre-commit time.
+- **PR completion gate (CI)** — re-scans every commit message in the PR range against the same completion/evidence patterns. Catches commits made with `--no-verify` or via a non-commit-msg-aware workflow (e.g. `git commit -m "..."` on an older clone).
 
 ## Bypass policy
 

@@ -4,18 +4,29 @@
 Run from GitHub Actions on every PR. Validates that the PR follows the
 required agent workflow:
 
-  1. PR was opened from an agent/<tool>/<YYYYMMDD>-<slug> branch
-  2. Task ledger (.agent/tasks/<task_id>.json) exists for that branch
-  3. PR body has all required sections
-  4. Every changed file is within the ledger's allowed_paths
-  5. No conflict markers in any committed file
-  6. No merge commits in the PR's commit range
-  7. Forbidden command transcripts are not present in PR body (the
-     negative-smoke section is required but should show commands being
-     REFUSED, not executed)
+  1. PR was opened from an agent/<tool>/<YYYYMMDD>-<slug> branch.
+  2. Task ledger (.agent/tasks/<task_id>.json) exists for that branch.
+  3. PR body has all required sections AND each section has non-empty
+     non-comment content.
+  4. Every changed file is within the ledger's allowed_paths.
+  5. No conflict markers in any committed file.
+  6. No merge commits in the PR's commit range.
+  7. Ledger base_sha is reachable from the PR's base or its commit
+     range (i.e. ledger has not been rebased onto a stale base).
+  8. Every commit message in the PR range that contains a completion
+     phrase ('verified', 'shipped', 'confirmed', 'tested', 'smoked')
+     also contains at least one evidence reference.
+  9. If allowed_paths was modified by this PR, the new list is a
+     subset of the base's list (no agent-driven scope expansion).
 
-Exits 0 on pass, non-zero on fail. CI treats failure as required-check-failed
-(when wired with branch protection) or visible-red-check (otherwise).
+NOTE: The "negative-smoke" section is checked for presence and
+non-empty content only. Semantic verification that the transcript
+actually shows commands being refused is operator-judgement at PR
+review time — this gate does not parse the transcript content.
+
+Exits 0 on pass, non-zero on fail. CI treats failure as
+required-check-failed (when wired with branch protection) or
+visible-red-check (otherwise).
 
 Environment:
   GITHUB_TOKEN     — for gh CLI
@@ -189,6 +200,168 @@ def check_no_merge_commits(base_sha: str, head_sha: str) -> bool:
     return True
 
 
+# ---- check 7: ledger base_sha is reachable ----
+
+def check_base_sha_reachable(ledger_base_sha: str, base_sha: str, head_sha: str) -> bool:
+    """The ledger records the base SHA at task-start time. That SHA must
+    still be an ancestor of the PR's base OR appear inside the PR's
+    commit range. Otherwise the branch has been rebased onto a stale
+    or alien base and the ledger no longer describes reality."""
+    if not ledger_base_sha or ledger_base_sha == "auto-resolved-at-start":
+        # Older ledgers / manual ledgers may have a placeholder. Skip
+        # with a notice rather than fail.
+        sys.stderr.write(
+            "  NOTE: ledger base_sha is placeholder; skipping reachability check.\n"
+        )
+        return True
+    # Is ledger_base_sha an ancestor of base_sha OR head_sha?
+    try:
+        subprocess.check_call(
+            ["git", "merge-base", "--is-ancestor", ledger_base_sha, base_sha],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        return True
+    except subprocess.CalledProcessError:
+        pass
+    try:
+        subprocess.check_call(
+            ["git", "merge-base", "--is-ancestor", ledger_base_sha, head_sha],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        return True
+    except subprocess.CalledProcessError:
+        pass
+    fail(
+        f"ledger base_sha {ledger_base_sha[:10]} is not reachable from the PR base "
+        f"({base_sha[:10]}) or head ({head_sha[:10]}).\n"
+        "  The branch was likely rebased onto a different base than the ledger declares.\n"
+        "  Either restart the task from origin/main, or have the operator update the ledger."
+    )
+    return False
+
+
+# ---- check 8: commit-msg evidence scan ----
+
+COMPLETION_RE = re.compile(
+    r"(?i)\b(verified|shipped|confirmed|tested|smoked?)\b"
+)
+
+EVIDENCE_REGEXES = [
+    re.compile(r"(?i)https?://"),
+    re.compile(r"(?i)evidence:\s*\S{10,}"),
+    re.compile(r"(?i)pytest\b.*\bpassed\b"),
+    re.compile(r"(?i)screenshot:\s*\S+"),
+    re.compile(r"(?i)logbook:\s*\S+"),
+    re.compile(r"(?i)telegram:\s*\S+"),
+    re.compile(r"(?i)sms:\s*\S+"),
+    re.compile(r"(?i)physical-check:\s*\S+"),
+    re.compile(r"(?i)event_log:\s*\S+"),
+    re.compile(r"(?i)\.agent/tasks/\S+\.json"),
+]
+
+
+def _strip_comments(text: str) -> str:
+    return "\n".join(
+        line for line in text.splitlines() if not line.lstrip().startswith("#")
+    )
+
+
+def check_commit_msg_evidence(base_sha: str, head_sha: str) -> bool:
+    """For each commit in the PR range, if its message contains a
+    completion claim phrase, require at least one evidence-pattern
+    match in the same message. Mirrors rule 008 enforcement at PR time
+    in case the local commit-msg hook was bypassed."""
+    raw = run(
+        "git", "log", "--format=%H%x00%B%x00END%x00",
+        f"{base_sha}..{head_sha}",
+    )
+    if not raw:
+        return True
+
+    failures: list[tuple[str, str]] = []
+    # Records are SHA \x00 message \x00 END \x00
+    for record in raw.split("END\x00"):
+        record = record.strip()
+        if not record:
+            continue
+        parts = record.split("\x00", 1)
+        if len(parts) != 2:
+            continue
+        sha, msg = parts[0].strip(), parts[1].strip()
+        msg_clean = _strip_comments(msg)
+        if not COMPLETION_RE.search(msg_clean):
+            continue
+        if any(p.search(msg_clean) for p in EVIDENCE_REGEXES):
+            continue
+        first_line = msg_clean.splitlines()[0][:60] if msg_clean else ""
+        failures.append((sha[:10], first_line))
+
+    if failures:
+        fail(
+            "the following commit(s) contain a completion phrase "
+            "(verified/shipped/confirmed/tested/smoked) without an evidence "
+            "reference:"
+        )
+        for sha, line in failures:
+            sys.stderr.write(f"    {sha}  {line}\n")
+        sys.stderr.write(
+            "  Each such commit needs an evidence ref in its message "
+            "(URL, pytest output, evidence:, screenshot:, logbook:, etc.) "
+            "or rephrase to not claim completion.\n"
+        )
+        return False
+    return True
+
+
+# ---- check 9: allowed_paths-growth guard ----
+
+def check_allowed_paths_not_expanded(
+    repo_root: Path, ledger_rel_path: str, base_sha: str
+) -> bool:
+    """If allowed_paths was modified by this PR, verify the new list is
+    a SUBSET of the base's list. Catches agent-driven scope expansion."""
+    try:
+        base_blob = subprocess.check_output(
+            ["git", "show", f"{base_sha}:{ledger_rel_path}"],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        )
+    except subprocess.CalledProcessError:
+        # Ledger did not exist at base SHA — this is the first commit
+        # creating the ledger. No comparison possible / needed.
+        return True
+
+    try:
+        base_data = json.loads(base_blob)
+    except json.JSONDecodeError:
+        # Base ledger unreadable; skip with notice.
+        sys.stderr.write(
+            "  NOTE: base-SHA ledger unparseable; skipping scope-expansion check.\n"
+        )
+        return True
+
+    base_allowed = set(base_data.get("allowed_paths") or [])
+    head_data = json.loads((repo_root / ledger_rel_path).read_text(encoding="utf-8"))
+    head_allowed = set(head_data.get("allowed_paths") or [])
+
+    new_entries = head_allowed - base_allowed
+    if new_entries:
+        fail(
+            "allowed_paths was expanded by this PR — agent-driven scope "
+            "growth requires operator approval:"
+        )
+        for entry in sorted(new_entries):
+            sys.stderr.write(f"    + {entry}\n")
+        sys.stderr.write(
+            "  Either remove the new entries (and the files that depend on them) "
+            "or have the operator update the ledger in a separate commit.\n"
+        )
+        return False
+    return True
+
+
 # ---- main ----
 
 def main() -> int:
@@ -262,6 +435,22 @@ def main() -> int:
     # 6. merge commits
     if not check_no_merge_commits(base_sha, head_sha):
         all_ok = False
+
+    # 7. base_sha reachability
+    if ledger_data:
+        ledger_base = ledger_data.get("base_sha", "")
+        if not check_base_sha_reachable(ledger_base, base_sha, head_sha):
+            all_ok = False
+
+    # 8. commit-msg evidence scan
+    if not check_commit_msg_evidence(base_sha, head_sha):
+        all_ok = False
+
+    # 9. allowed_paths-growth guard
+    if ledger_path is not None:
+        rel = str(ledger_path.relative_to(repo_root)).replace("\\", "/")
+        if not check_allowed_paths_not_expanded(repo_root, rel, base_sha):
+            all_ok = False
 
     if all_ok:
         print("\ncompletion gate: PASS")

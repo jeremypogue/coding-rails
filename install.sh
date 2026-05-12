@@ -159,6 +159,28 @@ if [ "$DRY_RUN" != "1" ]; then
   echo "${VERSION}" > "${TARGET}/.agent/coding-rails-version.txt"
   say "+ .agent/coding-rails-version.txt = ${VERSION}"
 
+  # Runtime state dir (self-ignoring). agent_finish_task.sh writes
+  # awaiting_review status here; the committed ledger stays immutable.
+  mkdir -p "${TARGET}/.agent/state"
+  cat > "${TARGET}/.agent/state/.gitignore" <<'STATE_IGNORE_EOF'
+# coding-rails runtime task state — per-machine, not tracked.
+*
+!.gitignore
+STATE_IGNORE_EOF
+  say "+ .agent/state/.gitignore (runtime state)"
+
+  mkdir -p "${TARGET}/.agent/precommit-markers"
+  cat > "${TARGET}/.agent/precommit-markers/.gitignore" <<'MARKER_IGNORE_EOF'
+*
+!.gitignore
+MARKER_IGNORE_EOF
+  cat > "${TARGET}/.agent/.gitignore" <<'AGENT_IGNORE_EOF'
+# Runtime artifacts written by coding-rails hooks. Per-machine, not tracked.
+precommit.log
+self-audits/
+AGENT_IGNORE_EOF
+  say "+ .agent/.gitignore (runtime artifacts)"
+
   # ensure hook files are executable
   find "${TARGET}/.githooks" -type f -exec chmod +x {} \; 2>/dev/null || true
   find "${TARGET}/scripts/coding-rails" -type f \( -name '*.sh' -o -name '*.py' \) -exec chmod +x {} \; 2>/dev/null || true

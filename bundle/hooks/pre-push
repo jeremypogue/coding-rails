@@ -128,6 +128,24 @@ while IFS=' ' read -r local_ref local_sha remote_ref remote_sha; do
   # For each commit in the pushed range, look it up in the precommit log.
   # Commits that are missing OR tagged bypass=likely-no-verify block the
   # push unless OPERATOR_REVIEWED_BYPASS=1.
+  #
+  # If coding-rails is installed (.agent/coding-rails-version.txt exists)
+  # the precommit log MUST exist. Its absence means either the post-commit
+  # hook isn't firing (broken install) or the log was deleted. Either way,
+  # block the push unless explicitly bypassed.
+  has_coding_rails=0
+  [ -f "${REPO}/.agent/coding-rails-version.txt" ] && has_coding_rails=1
+
+  if [ "${has_coding_rails}" = "1" ] && [ ! -f "${PRECOMMIT_LOG}" ]; then
+    if [ "${OPERATOR_REVIEWED_BYPASS:-0}" != "1" ]; then
+      fail "refusing push: coding-rails is installed but ${PRECOMMIT_LOG#${REPO}/} is missing."
+      fail "  Either the post-commit hook never fired (broken install) or the log was"
+      fail "  deleted. Operator must review and re-push."
+      failed=1
+      continue
+    fi
+  fi
+
   if [ -f "${PRECOMMIT_LOG}" ]; then
     if [ "${remote_sha}" = "0000000000000000000000000000000000000000" ]; then
       commits="$(git rev-list "${local_sha}" --not --remotes=origin 2>/dev/null || true)"

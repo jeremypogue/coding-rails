@@ -218,16 +218,24 @@ else
   exit 8
 fi
 
-# Mark ledger as awaiting review
+# Record runtime state (PR URL, awaiting-review status) in a SEPARATE
+# state file. The committed task ledger is the immutable task
+# declaration; runtime mutations go here and are gitignored.
 python3 - <<EOF
 import json, pathlib
-p = pathlib.Path(r"${ledger}")
-data = json.loads(p.read_text(encoding='utf-8'))
-data["status"] = "awaiting_review"
-data["pr_url"] = "${pr_url}"
-p.write_text(json.dumps(data, indent=2), encoding='utf-8')
+state_dir = pathlib.Path(r"${REPO}/.agent/state")
+state_dir.mkdir(parents=True, exist_ok=True)
+state_path = state_dir / "${task_id}.json"
+state = {
+    "task_id": "${task_id}",
+    "status": "awaiting_review",
+    "pr_url": "${pr_url}",
+    "branch": "${current_branch}",
+    "updated_at": __import__("datetime").datetime.utcnow().isoformat() + "Z",
+}
+state_path.write_text(json.dumps(state, indent=2), encoding='utf-8')
 EOF
 
-echo "  ledger status: awaiting_review"
+echo "  runtime state recorded: .agent/state/${task_id}.json"
 echo ""
 echo "Done. Operator reviews + merges."

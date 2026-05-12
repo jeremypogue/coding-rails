@@ -72,6 +72,38 @@ def load_config(repo_root: Path) -> dict:
     return out
 
 
+def load_exception_paths(repo_root: Path) -> set[str]:
+    """Read operator-maintained exceptions from .agent/test-coverage-exceptions.md.
+    Each non-comment, non-blank line is treated as a file path glob to
+    exempt from the paired-test requirement. Lines starting with '#' or
+    blank lines are ignored.
+
+    Example .agent/test-coverage-exceptions.md:
+        # Generated files have no source-of-truth to test
+        agents/_generated_*.py
+        # Comment-only docs change in PR #42
+        agents/docs.py
+    """
+    exc_path = repo_root / ".agent" / "test-coverage-exceptions.md"
+    if not exc_path.is_file():
+        return set()
+    out: set[str] = set()
+    try:
+        text = exc_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return set()
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        # Strip inline comments after `#`
+        if " #" in line:
+            line = line.split(" #", 1)[0].strip()
+        if line:
+            out.add(line)
+    return out
+
+
 def fail(reason: str) -> None:
     sys.stderr.write(f"rule 004 (test coverage): {reason}\n")
 
@@ -96,6 +128,7 @@ def main() -> int:
     glob = cfg["agent_surface_glob"]
     template = cfg["test_path_template"]
     excludes: list[str] = cfg.get("exclude_patterns", [])
+    operator_exceptions = load_exception_paths(repo_root)
 
     # Find agent-surface files in the staged set
     missing: list[tuple[str, str]] = []  # (source_path, expected_test_path)
@@ -103,6 +136,9 @@ def main() -> int:
 
     for path in staged:
         if any(fnmatchcase(path, exc) for exc in excludes):
+            continue
+        if any(fnmatchcase(path, exc) for exc in operator_exceptions):
+            # operator-documented exception in .agent/test-coverage-exceptions.md
             continue
         name = name_of(path, glob)
         if name is None:

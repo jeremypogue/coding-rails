@@ -60,10 +60,17 @@ git clone https://github.com/jeremypogue/coding-rails ../coding-rails
 
 Flags:
 
-- `--setup-github` — also configure GitHub branch protection on `main`/`master` via the `gh` CLI (requires `gh auth status` to show `repo` scope). Configures: require PR, required status checks (`agent-task-gates`, `agent-rules-check`), no force push, no deletion, no direct push, require CODEOWNERS review.
-- `--force` — overwrite existing files in the target. Default is skip-if-present.
+- `--setup-github` — also configure GitHub branch protection on `main`/`master` via the `gh` CLI (requires `gh auth status` to show `repo` scope). Configures: require PR, required status checks (`agent-task-gates`, `agent-rules-check`), no force push, no deletion, no direct push, require CODEOWNERS review. On GitHub Free private repos this step is automatically skipped with a clear note (server-side floor unavailable; local hooks + CI + operator merge-button discipline is the floor).
+- `--force` — overwrite **everything** including entry pointers (`AGENTS.md`, `CLAUDE.md`, `.clinerules/`). Default behavior is described below.
 - `--dry-run` — show what would be copied without doing it.
 - `--target=<path>` — install into a directory other than the current one.
+
+### Overwrite semantics
+
+- **Bundle-owned paths** (`.agent/rules/`, `.githooks/`, `.github/workflows/`, `scripts/coding-rails/`) are **always overwritten**. This is intentional: it's how upgrades work — the bundle is authoritative for these paths.
+- **Entry pointer files** (`AGENTS.md`, `CLAUDE.md`, `.clinerules/01-coding-rails-pointer.md`) are **kept** if they already exist in the target. The bundle does not stomp on a project's existing instructions. Use `--force` to overwrite them.
+- **Runtime artifact directories** (`.agent/state/`, `.agent/precommit-markers/`) are created fresh with a self-ignoring `.gitignore`. Existing contents are preserved.
+- **Per-project config** (`.agent/coding-rails.config.yml`) is NOT touched. Projects edit this file to override defaults; the bundle ships an example at `bundle/coding-rails.config.example.yml` for reference.
 
 After install:
 
