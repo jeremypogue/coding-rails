@@ -100,7 +100,7 @@ After install:
 | PR completion | task ends as PR; PR body has required sections | `agent_completion_gate.py` | CI |
 | Self-tests | the bundle's bash + Python scripts have integration tests | `tests/` + `.github/workflows/ci.yml` | CI on every push/PR to coding-rails main |
 
-Coming next: deeper CI for hook chain edge cases (force-push refusal via real git, commit-msg via real git); `agent_completion_gate.py` test coverage (currently relies on integration testing via PR runs); fuller workplace-rule set as opt-in extensions.
+Coming next: deeper CI for hook chain edge cases (force-push refusal via real git push); fuller workplace-rule set as opt-in extensions. Helper-level unit tests for `agent_completion_gate.py` exist (v0.3.0 added 13); end-to-end `main()` coverage via `--pr-json` testing mode exists (v0.4.0); real-CI integration coverage comes from PR runs against installed targets.
 
 ## Why "coding-rails" and not "agent-rails"
 

@@ -2,6 +2,38 @@
 
 All notable changes to coding-rails are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Semver.
 
+## [0.4.0] — 2026-05-12
+
+Driven by a third external review of v0.3.0. Four remaining consistency / coverage gaps closed.
+
+### Fixed
+
+- **CI completion gate's rule-008 scan now uses the same patterns + per-project config as the local commit-msg hook.** Previously, `agent_completion_gate.py::check_commit_msg_evidence` hardcoded `COMPLETION_RE` and `EVIDENCE_REGEXES`. A project could customize `.agent/coding-rails.config.yml` and the local commit-msg hook would respect it, but CI would enforce a different policy. New `bundle/scripts/_evidence_lib.py` holds the shared logic; both sites import it. (Review point 1 — biggest remaining consistency issue.)
+- **`check_allowed_paths_not_expanded` now catches scope growth *within* a PR.** Previously, if the ledger didn't exist at `base_sha` (i.e. the PR creates the ledger), the check returned True unconditionally. An agent could create the ledger with narrow scope in commit 1, expand it in commit 2, and CI wouldn't notice. Now: if no base-SHA version exists, find the earliest commit in (base..head] that touched the ledger and use that as the comparison baseline. (Review point 2.)
+
+### Added
+
+- **`--pr-json <file>` mode** for `agent_completion_gate.py`. Bypasses the `gh pr view` round-trip by reading PR metadata from a local JSON file. Enables end-to-end testing of `main()` without network/auth/CI. (Review point 3.)
+- **`tests/test_evidence_lib.py`** — 17 tests covering the new shared module: defaults, YAML config loading (valid + invalid), comment stripping, message validation across the matrix (empty / no-claim / claim-without-evidence / claim-with-each-evidence-form), and per-project config affecting behavior.
+- **`tests/test_completion_gate_e2e.py`** — 8 end-to-end tests against `agent_completion_gate.py::main()` via `--pr-json`. Covers: normal happy path; ledger auto-allowed as bookkeeping; bad branch shape rejected; out-of-scope files rejected; missing PR body section rejected; commit-msg evidence enforcement across PR range; scope-growth-within-PR detection (the actual review-point-2 regression).
+- **`tests/test_hooks_integration.py`** gains two real-git pre-push tests: `test_pre_push_blocks_force_push` (push after amend), `test_pre_push_blocks_merge_commit_in_range` (push of a no-ff merge).
+
+### Changed
+
+- **`agent_completion_gate.py` is now a thin coordinator** over `_evidence_lib` for the commit-msg evidence scan. The hardcoded `COMPLETION_RE` and `EVIDENCE_REGEXES` are gone; the shared library is the single source of truth.
+- **README "Coming next" wording updated** to reflect what's actually deferred (real-git force-push tests, fuller workplace-rule set) vs. what now exists (helper-level unit tests, `--pr-json` E2E mode).
+
+### Self-test counts
+
+- v0.3.0: 132 tests
+- **v0.4.0: 158 passing + 1 conditional skip** (+26 net: 17 evidence_lib + 8 completion gate E2E + 2 pre-push integration; small adjustments to existing tests)
+
+### Still deferred
+
+- Operator-authored scope (issue #10 from v0.2.0 review).
+- A genuine `gh` mock would replace `--pr-json` mode with a stronger contract. `--pr-json` is the pragmatic stopgap.
+- `commit-msg` real-git integration test for the strict-no-arg behavior (currently unit-tested only).
+
 ## [0.3.0] — 2026-05-12
 
 Driven by a second external review of v0.2.0 plus the first real-world use of the bundle on agent-mesh-v2. Three real defects surfaced during use and are fixed here.
