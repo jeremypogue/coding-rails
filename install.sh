@@ -196,7 +196,8 @@ if [ "$SETUP_GITHUB" = "1" ]; then
     # If a project does not yet have those workflows wired into CI, the
     # protection setup tolerates missing checks (they will start enforcing
     # once the workflows run for the first time).
-    gh api "repos/${owner_repo}/branches/${default_branch}/protection" \
+    response="$(mktemp)"
+    http_code="$(gh api "repos/${owner_repo}/branches/${default_branch}/protection" \
       --method PUT \
       --header "Accept: application/vnd.github+json" \
       --raw-field "required_status_checks[strict]=true" \
@@ -211,9 +212,37 @@ if [ "$SETUP_GITHUB" = "1" ]; then
       --raw-field "allow_deletions=false" \
       --raw-field "required_linear_history=true" \
       --raw-field "block_creations=false" \
-      >/dev/null \
-      && say "+ branch protection applied to ${default_branch}" \
-      || { echo "ERROR: branch protection update failed." >&2; exit 5; }
+      >"${response}" 2>&1 && echo 200 || echo "$?")"
+
+    if [ "${http_code}" = "200" ]; then
+      say "+ branch protection applied to ${default_branch}"
+    elif grep -q "Upgrade to GitHub Pro" "${response}" 2>/dev/null \
+      || grep -q "make this repository public" "${response}" 2>/dev/null; then
+      cat <<EOF >&2
+
+  NOTE: GitHub branch protection is not available on this repository.
+  Free-tier private repos cannot use branch protection without GitHub Pro.
+
+  The bundle is still installed and fully functional:
+    - Local pre-commit / pre-push hooks enforce rules at the developer machine.
+    - CI workflows still run on every push and PR; status is visible.
+    - You (as sole approver) are the floor: do not click merge on red CI,
+      and do not push directly to the protected branch.
+
+  To get the server-side floor, either:
+    - upgrade the repo to GitHub Pro (\$4/mo), OR
+    - make the repository public, OR
+    - self-host on Gitea/Forgejo where protection is free.
+
+EOF
+      say "+ branch protection skipped (Free private repo); hooks + CI still active"
+    else
+      echo "ERROR: branch protection update failed. Response:" >&2
+      cat "${response}" >&2
+      rm -f "${response}"
+      exit 5
+    fi
+    rm -f "${response}"
   fi
 fi
 
