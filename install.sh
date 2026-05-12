@@ -142,7 +142,9 @@ copy_dir "${BUNDLE_DIR}/rules"      "${TARGET}/.agent/rules"            merge
 copy_dir "${BUNDLE_DIR}/hooks"      "${TARGET}/.githooks"               merge
 copy_dir "${BUNDLE_DIR}/workflows"  "${TARGET}/.github/workflows"       merge
 copy_dir "${BUNDLE_DIR}/scripts"    "${TARGET}/scripts/coding-rails"    merge
-copy_dir "${BUNDLE_DIR}/tests"      "${TARGET}/tests/coding_rails"      merge
+# Note: bundle does NOT ship tests for the target to inherit. Tests live
+# at the coding-rails root tests/ and validate the bundle itself; they
+# are not portable into consumer repos.
 
 hdr "copying entry templates (skip if already present)"
 copy_template_file "${BUNDLE_DIR}/entry-templates/AGENTS.md.template"  "${TARGET}/AGENTS.md"
