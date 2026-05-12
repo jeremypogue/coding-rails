@@ -41,7 +41,10 @@ SHARED_BRANCH_PATTERNS=(
 
 # Acceptable agent branch shape:
 #   agent/<tool>/<YYYYMMDD>-<slug>
-AGENT_BRANCH_RE='^refs/heads/agent/[a-z0-9_-]+/[0-9]{8}-[a-z0-9_-]+$'
+# Slug allows dots so version numbers and CVE identifiers work:
+#   agent/claude/20260512-upgrade-coding-rails-v0.2.0
+#   agent/codex/20260601-cve-2024.123-patch
+AGENT_BRANCH_RE='^refs/heads/agent/[a-z0-9_-]+/[0-9]{8}-[a-z0-9._-]+$'
 
 fail() {
   printf '\npre-push: %s\n' "$*" >&2

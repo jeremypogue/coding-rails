@@ -60,7 +60,9 @@ REQUIRED_SECTIONS = [
     "## Not done / follow-up",
 ]
 
-AGENT_BRANCH_RE = re.compile(r"^agent/[a-z0-9_-]+/[0-9]{8}-[a-z0-9_-]+$")
+# Slug allows dots so version numbers / CVE identifiers work:
+#   agent/claude/20260512-upgrade-coding-rails-v0.2.0
+AGENT_BRANCH_RE = re.compile(r"^agent/[a-z0-9_-]+/[0-9]{8}-[a-z0-9._-]+$")
 CONFLICT_MARKER_RE = re.compile(r"^(<<<<<<<|=======|>>>>>>>)", re.MULTILINE)
 
 

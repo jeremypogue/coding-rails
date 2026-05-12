@@ -66,8 +66,9 @@ if [ -z "${AGENT_NAME}" ]; then
   AGENT_NAME="${CODING_RAILS_AGENT:-$(whoami 2>/dev/null || echo unknown)}"
 fi
 
-# task_id format check (YYYYMMDD-slug)
-if ! [[ "${TASK_ID}" =~ ^[0-9]{8}-[a-z0-9_-]+$ ]]; then
+# task_id format check (YYYYMMDD-slug); slug allows dots for version
+# numbers and CVE identifiers (e.g. 20260512-fix-v1.2.3).
+if ! [[ "${TASK_ID}" =~ ^[0-9]{8}-[a-z0-9._-]+$ ]]; then
   echo "ERROR: task_id must match YYYYMMDD-slug, got '${TASK_ID}'" >&2
   echo "  example: 20260512-pool-pump-fix" >&2
   exit 1
