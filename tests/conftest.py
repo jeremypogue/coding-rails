@@ -161,3 +161,84 @@ def git_helper(tmp_repo: Path):
         return _git(tmp_repo, *args, check=check)
 
     return call
+
+
+# ---- bash-script test fixtures ----
+
+@pytest.fixture(scope="session")
+def bash_path() -> str:
+    """Locate a bash executable; skip the test if not available."""
+    for candidate in ("bash", "/bin/bash", "/usr/bin/bash", "C:/Program Files/Git/bin/bash.exe"):
+        try:
+            result = subprocess.run(
+                [candidate, "-c", "echo ok"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if result.returncode == 0 and result.stdout.strip() == "ok":
+                return candidate
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+            continue
+    pytest.skip("bash not available")
+
+
+@pytest.fixture
+def bash_repo(tmp_path: Path, bash_path: str) -> Path:
+    """A fresh empty git repo for testing bash scripts.
+
+    Unlike `tmp_repo`, this does NOT pre-copy the bundle — tests should
+    install the bundle themselves (so install.sh is the system under
+    test) or copy specific scripts as needed.
+    """
+    repo = tmp_path / "bashrepo"
+    repo.mkdir()
+    subprocess.run([bash_path, "-c", "git init -b main ."], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=str(repo), check=True)
+    subprocess.run(["git", "config", "user.name", "Test User"], cwd=str(repo), check=True)
+    subprocess.run(["git", "config", "commit.gpgsign", "false"], cwd=str(repo), check=True)
+    return repo
+
+
+@pytest.fixture
+def bash_repo_with_origin(bash_repo: Path, tmp_path: Path) -> tuple[Path, Path]:
+    """A fresh repo + a bare-repo origin remote for testing pre-push.
+
+    Returns (working_repo, bare_origin_path).
+    """
+    bare = tmp_path / "origin.git"
+    subprocess.run(["git", "init", "--bare", "-b", "main", str(bare)], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "remote", "add", "origin", str(bare)],
+        cwd=str(bash_repo),
+        check=True,
+    )
+    # Seed: initial commit + push to origin so origin/main exists
+    (bash_repo / "README.md").write_text("# test\n")
+    subprocess.run(["git", "add", "README.md"], cwd=str(bash_repo), check=True)
+    subprocess.run(["git", "commit", "-m", "initial"], cwd=str(bash_repo), check=True, capture_output=True)
+    subprocess.run(["git", "push", "origin", "main"], cwd=str(bash_repo), check=True, capture_output=True)
+    return bash_repo, bare
+
+
+def install_bundle(repo: Path, bash: str) -> subprocess.CompletedProcess:
+    """Run install.sh against the given repo. Returns the CompletedProcess."""
+    return subprocess.run(
+        [bash, str(PROJECT_ROOT / "install.sh"), f"--target={repo}"],
+        capture_output=True,
+        text=True,
+    )
+
+
+@pytest.fixture
+def installer(bash_path: str):
+    """Returns a function that installs the bundle into a target repo."""
+
+    def install(repo: Path, *extra: str) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [bash_path, str(PROJECT_ROOT / "install.sh"), f"--target={repo}", *extra],
+            capture_output=True,
+            text=True,
+        )
+
+    return install
