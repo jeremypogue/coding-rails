@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+# coding-rails post-commit hook
+#
+# Records whether pre-commit actually ran for this commit, by checking the
+# marker file pre-commit dropped on success. Pre-commit hooks bypassed with
+# --no-verify leave no marker, so they show up here as
+# "bypass=likely-no-verify" and the pre-push hook will block them.
+#
+# Appends to .agent/precommit.log:
+#   <iso-ts> repo=<basename> sha=<sha> bypass=no|likely-no-verify
+
+set -uo pipefail
+
+REPO="$(git rev-parse --show-toplevel)"
+LEDGER_DIR="${REPO}/.agent"
+MARKER="${LEDGER_DIR}/precommit-markers/pending"
+LOG="${LEDGER_DIR}/precommit.log"
+
+mkdir -p "${LEDGER_DIR}" 2>/dev/null || true
+
+sha="$(git rev-parse HEAD 2>/dev/null || echo)"
+ts="$(date -u +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || echo)"
+repo_name="$(basename "${REPO}")"
+
+if [ -z "${sha}" ]; then
+  exit 0
+fi
+
+if [ -f "${MARKER}" ]; then
+  status="no"
+  rm -f "${MARKER}" 2>/dev/null || true
+else
+  status="likely-no-verify"
+fi
+
+printf '%s repo=%s sha=%s bypass=%s\n' "${ts}" "${repo_name}" "${sha}" "${status}" >>"${LOG}" 2>/dev/null || true
+
+# This hook never fails; it only records. Failure to write the log is
+# best-effort (e.g. read-only filesystem). The pre-push hook will catch
+# the absent log line as bypassed.
+exit 0
