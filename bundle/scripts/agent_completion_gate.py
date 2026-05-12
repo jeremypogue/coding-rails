@@ -150,8 +150,21 @@ def path_in_allowed(path: str, allowed: list[str]) -> bool:
     return False
 
 
-def check_allowed_paths(changed: list[str], allowed: list[str]) -> bool:
-    out_of_scope = [p for p in changed if not path_in_allowed(p, allowed)]
+def check_allowed_paths(
+    changed: list[str],
+    allowed: list[str],
+    bookkeeping: set[str] | None = None,
+) -> bool:
+    """Verify every changed file is within allowed_paths OR is a bookkeeping
+    path. Bookkeeping paths (the task ledger itself, the test-coverage
+    exceptions file) are auto-allowed without explicit declaration —
+    mirrors the pre-commit rule 001 behavior so the workflow can ship a
+    task without manually listing its own ledger."""
+    bookkeeping = bookkeeping or set()
+    out_of_scope = [
+        p for p in changed
+        if p not in bookkeeping and not path_in_allowed(p, allowed)
+    ]
     if out_of_scope:
         fail("the following changed files are outside allowed_paths:")
         for p in out_of_scope:
@@ -159,6 +172,10 @@ def check_allowed_paths(changed: list[str], allowed: list[str]) -> bool:
         sys.stderr.write("  allowed_paths in ledger:\n")
         for entry in allowed:
             sys.stderr.write(f"    {entry}\n")
+        if bookkeeping:
+            sys.stderr.write("  bookkeeping paths (auto-allowed):\n")
+            for entry in sorted(bookkeeping):
+                sys.stderr.write(f"    {entry}\n")
         return False
     return True
 
@@ -421,10 +438,15 @@ def main() -> int:
     if not check_pr_body(body):
         all_ok = False
 
-    # 4. allowed_paths
+    # 4. allowed_paths (with bookkeeping auto-allow — mirrors rule 001)
     allowed = ledger_data.get("allowed_paths") or []
+    bookkeeping: set[str] = {".agent/test-coverage-exceptions.md"}
+    if ledger_path is not None:
+        bookkeeping.add(
+            str(ledger_path.relative_to(repo_root)).replace("\\", "/")
+        )
     if allowed:
-        if not check_allowed_paths(changed, allowed):
+        if not check_allowed_paths(changed, allowed, bookkeeping):
             all_ok = False
     else:
         fail("ledger has no allowed_paths; cannot verify scope.")

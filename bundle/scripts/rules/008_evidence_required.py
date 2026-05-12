@@ -89,15 +89,21 @@ def load_config(repo_root: Path) -> dict:
 
 
 def read_commit_msg(repo_root: Path, msg_path_arg: str | None) -> str:
-    """Read the commit message. If invoked as a commit-msg hook, the
-    first arg is the path to COMMIT_EDITMSG. If invoked as pre-commit
-    (no arg), read from .git/COMMIT_EDITMSG directly."""
-    if msg_path_arg:
-        return Path(msg_path_arg).read_text(encoding="utf-8")
-    candidate = repo_root / ".git" / "COMMIT_EDITMSG"
-    if not candidate.is_file():
+    """Read the commit message. Only the commit-msg hook invocation
+    passes the path as $1. Pre-commit invocation has no arg, in which
+    case this returns empty string — main() will exit 0 quietly.
+
+    Earlier versions of this script fell back to reading
+    .git/COMMIT_EDITMSG when no arg was passed. That was unsafe because
+    COMMIT_EDITMSG can hold stale content from a previously-failed
+    commit (git does not write a fresh `-m` message there until later
+    in the lifecycle). The strict no-arg → return "" behavior closes
+    that hole: only the commit-msg invocation, which receives the
+    actual message path, can validate. See coding-rails issue #7.
+    """
+    if not msg_path_arg:
         return ""
-    return candidate.read_text(encoding="utf-8")
+    return Path(msg_path_arg).read_text(encoding="utf-8")
 
 
 def strip_comments(text: str) -> str:

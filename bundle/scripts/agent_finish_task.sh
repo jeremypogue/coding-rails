@@ -114,18 +114,50 @@ if [ -n "${mc}" ]; then
   exit 4
 fi
 
-# ---- run rule checks ----
+# ---- run rule checks against the committed range ----
+#
+# The rule scripts inspect `git diff --cached --name-only`. On a clean
+# working tree, nothing is staged, so they'd see no files and pass
+# trivially — masking real violations that only appear in the committed
+# range. Use a temp index to populate "staged" with the files in
+# ${base_ref}..HEAD, run the rule scripts against that view, then drop
+# the temp index. The real index is untouched.
 if [ -d "${RULES_DIR}" ]; then
-  echo "Running rule checks..."
+  echo "Running rule checks against ${base_ref}..HEAD..."
+  tmp_index="$(mktemp -t coding-rails-index.XXXXXX 2>/dev/null || mktemp)"
+  cleanup() {
+    rm -f "${tmp_index}" 2>/dev/null || true
+    unset GIT_INDEX_FILE
+  }
+  trap cleanup EXIT
+
+  # Seed the temp index with the base SHA's tree, then stage the diff.
+  GIT_INDEX_FILE="${tmp_index}" git read-tree "${base_ref}" 2>/dev/null || true
+
+  changed="$(git diff --name-only --diff-filter=ACMR "${base_ref}..HEAD" 2>/dev/null || true)"
+  while IFS= read -r f; do
+    [ -z "${f}" ] && continue
+    if [ -f "${f}" ]; then
+      GIT_INDEX_FILE="${tmp_index}" git add -- "${f}" 2>/dev/null || true
+    else
+      # File was deleted in this range; record the deletion in the temp index
+      GIT_INDEX_FILE="${tmp_index}" git rm --cached -- "${f}" 2>/dev/null || true
+    fi
+  done <<<"${changed}"
+
   rules_failed=0
   for check in "${RULES_DIR}"/*.py; do
     [ -f "${check}" ] || continue
-    if ! python3 "${check}"; then
+    if ! GIT_INDEX_FILE="${tmp_index}" python3 "${check}"; then
       rules_failed=1
     fi
   done
+
+  cleanup
+  trap - EXIT
+
   if [ "${rules_failed}" -ne 0 ]; then
-    fail "rule checks failed; not pushing. Fix the issues above and re-run."
+    fail "rule checks failed against ${base_ref}..HEAD; not pushing. Fix the issues above and re-run."
     exit 5
   fi
 fi

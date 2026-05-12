@@ -60,6 +60,30 @@ def test_passes_when_no_msg_arg_no_file(tmp_repo, run_rule):
     assert result.returncode == 0
 
 
+def test_pre_commit_ignores_stale_editmsg(tmp_repo, run_rule):
+    """REGRESSION: rule 008 invoked without a msg-path arg must NOT read
+    .git/COMMIT_EDITMSG, even if EDITMSG holds stale completion-claim
+    content from a previously-failed commit.
+
+    This is the v0.3.0 fix for coding-rails issue #7. Earlier versions
+    fell back to reading EDITMSG when no arg was passed, which caused
+    false positives when a prior `git commit -m` had left a stale
+    message there.
+    """
+    # Plant a stale message that WOULD trigger 008 if read
+    msg_path = tmp_repo / ".git" / "COMMIT_EDITMSG"
+    msg_path.write_text(
+        "Fix pool pump bug\n\nverified locally with no evidence at all",
+        encoding="utf-8",
+    )
+    # Call without an arg (pre-commit invocation pattern)
+    result = run_rule("008_evidence_required.py")
+    # Must exit 0; pre-commit invocation should not read EDITMSG
+    assert result.returncode == 0, (
+        f"008 read stale EDITMSG when invoked without arg: {result.stderr}"
+    )
+
+
 def test_strips_git_comment_lines(tmp_repo, run_rule):
     """Git comment lines (starting with #) don't count as message content."""
     msg = _write_msg(tmp_repo, "# verified — this is a comment, not the message\n\nReal subject line")

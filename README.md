@@ -25,15 +25,16 @@ Coding agents (Claude Code, Codex, Cline, etc.) running in parallel sessions, wi
 │   ├── tasks/                  ← task metadata per coding-agent session
 │   └── coding-rails-version.txt
 ├── .githooks/
-│   ├── pre-commit              ← scope/test-pair/secrets/bypass-strip
-│   ├── pre-push                ← block shared branches, force, merge commits
+│   ├── pre-commit              ← invokes rule scripts (rules 001/004 + project rules)
+│   ├── commit-msg              ← invokes rule 008 (evidence required) on the message
+│   ├── pre-push                ← block shared branches, force, merge commits, bypass scan
 │   └── post-commit             ← bypass detection log
 ├── .github/workflows/
-│   ├── agent-task-gates.yml    ← PR body, scope, branch shape, negative-smoke
+│   ├── agent-task-gates.yml    ← PR body, scope, branch shape, base_sha, scope-growth, commit-msg evidence
 │   └── agent-rules-check.yml   ← per-rule check matrix
 ├── scripts/coding-rails/
 │   ├── agent_start_task.sh     ← creates task metadata + branch
-│   ├── agent_finish_task.sh    ← runs checks + pushes + opens PR
+│   ├── agent_finish_task.sh    ← runs rules against base_ref..HEAD + pushes + opens PR
 │   ├── agent_completion_gate.py
 │   ├── agent_bash_guard.sh     ← best-effort BASH_ENV destructive-git guard
 │   ├── agent_git_guard.py
@@ -42,7 +43,6 @@ Coding agents (Claude Code, Codex, Cline, etc.) running in parallel sessions, wi
 │       ├── 001_task_ledger.py
 │       ├── 004_test_coverage.py
 │       └── 008_evidence_required.py
-├── tests/coding_rails/         ← test suite for the rule checks themselves
 ├── AGENTS.md                   ← entry pointer for Codex (copied only if absent)
 ├── CLAUDE.md                   ← entry pointer for Claude Code (copied only if absent)
 └── .clinerules/                ← entry pointer for Cline (copied only if absent)
@@ -86,17 +86,21 @@ After install:
 
 | Rule | Source | Check | Where it fires |
 |---|---|---|---|
-| 001 Task ledger | every coding change has a fresh ledger entry | `scripts/coding-rails/rules/001_task_ledger.py` | pre-commit |
-| 004 Test coverage | code change paired with test | `scripts/coding-rails/rules/004_test_coverage.py` | pre-commit |
-| 008 Evidence required | "verified"/"shipped" commit msg requires evidence reference | `scripts/coding-rails/rules/008_evidence_required.py` | pre-commit |
+| 001 Task ledger | every coding change has a fresh ledger entry + staged files in `allowed_paths` (ledger itself auto-allowed as bookkeeping) | `scripts/coding-rails/rules/001_task_ledger.py` | pre-commit + CI completion gate |
+| 004 Test coverage | code change paired with test (operator exceptions in `.agent/test-coverage-exceptions.md`) | `scripts/coding-rails/rules/004_test_coverage.py` | pre-commit + CI |
+| 008 Evidence required | "verified"/"shipped" commit msg requires evidence reference | `scripts/coding-rails/rules/008_evidence_required.py` | **commit-msg** (per-commit) + CI completion gate (across PR range) |
 | Branch scope | only the personal `agent/<tool>/<date>-<slug>` branch is push-allowed | `bundle/hooks/pre-push` | pre-push |
 | No force push | reject `--force` / `--force-with-lease` | `bundle/hooks/pre-push` | pre-push |
-| No merge commits | reject merge commits in pushed range | `bundle/hooks/pre-push` | pre-push |
+| No merge commits | reject merge commits in pushed range | `bundle/hooks/pre-push` + completion gate | pre-push + CI |
 | No bypass leakage | hook output never instructs agents how to bypass | `bundle/hooks/*` | every hook |
-| Allowed paths | staged files must be within task's `allowed_paths` | `bundle/hooks/pre-commit` | pre-commit |
-| PR completion | task ends as PR; PR body has required sections | `scripts/coding-rails/agent_completion_gate.py` | CI |
+| Allowed paths | every changed file in task's `allowed_paths` (ledger + test-coverage-exceptions auto-allowed) | `bundle/hooks/pre-commit` + completion gate | pre-commit + CI |
+| Conflict markers | no `<<<<<<<` / `=======` / `>>>>>>>` in committed files | `agent_completion_gate.py` | CI |
+| Base SHA reachable | ledger's `base_sha` must be reachable from PR's base or head | `agent_completion_gate.py` | CI |
+| Scope growth | PR cannot expand `allowed_paths` in its own ledger | `agent_completion_gate.py` | CI |
+| PR completion | task ends as PR; PR body has required sections | `agent_completion_gate.py` | CI |
+| Self-tests | the bundle's bash + Python scripts have integration tests | `tests/` + `.github/workflows/ci.yml` | CI on every push/PR to coding-rails main |
 
-Coming next (planned, not in initial skeleton): rules 002, 003, 005, 006 task-aware checks; full negative-smoke harness for agent_git_guard; portable rules-config for non-mesh projects.
+Coming next: deeper CI for hook chain edge cases (force-push refusal via real git, commit-msg via real git); `agent_completion_gate.py` test coverage (currently relies on integration testing via PR runs); fuller workplace-rule set as opt-in extensions.
 
 ## Why "coding-rails" and not "agent-rails"
 
