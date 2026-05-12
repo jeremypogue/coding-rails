@@ -320,3 +320,221 @@ def test_checkpoint_drift_with_drift_record(tmp_repo, make_branch, ledger_factor
     assert "DRIFT" in result.stdout
     # Either the drift record's contents or working-tree detection
     assert "evil" in result.stdout.lower()
+
+
+# ---- v0.6.0: scope-lock + drift-record immutability ----
+
+def _commit_initial_lock_and_drift(tmp_repo, make_branch, ledger_factory, task_id):
+    """Set up: branch + ledger + scope lock + drift record, all committed.
+    Returns (branch, ledger_path)."""
+    branch = f"agent/test/{task_id}"
+    make_branch(branch)
+    ledger = ledger_factory(
+        branch=branch, allowed_paths=["src/foo.py"], task_id=task_id
+    )
+    lock_path = _write_scope_lock(tmp_repo, task_id, branch, ["src/foo.py"])
+    drift_path = _write_drift(tmp_repo, task_id, branch, ["evil.py"], status="unresolved")
+    # Commit the initial state so file_existed_in_head returns True
+    subprocess.run(
+        ["git", "add", str(ledger), str(lock_path), str(drift_path)],
+        cwd=str(tmp_repo),
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "commit", "-m", "initial task setup", "--no-verify"],
+        cwd=str(tmp_repo),
+        check=True,
+        capture_output=True,
+    )
+    return branch, ledger, lock_path, drift_path
+
+
+def test_010_blocks_staged_modification_of_existing_scope_lock(
+    tmp_repo, make_branch, ledger_factory, run_rule
+):
+    """REGRESSION (v0.6.0): even if scope-hash matches, the rule refuses
+    a staged modification of an already-committed scope lock."""
+    branch, ledger, lock_path, drift_path = _commit_initial_lock_and_drift(
+        tmp_repo, make_branch, ledger_factory, "20260512-immut"
+    )
+    # Resolve the drift first so the existing-drift check doesn't fire
+    drift_path.write_text(
+        json.dumps({
+            "task_id": "20260512-immut",
+            "branch": branch,
+            "status": "resolved",
+            "unauthorized_paths": ["evil.py"],
+        }),
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "add", str(drift_path)], cwd=str(tmp_repo), check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "resolve drift", "--no-verify"],
+        cwd=str(tmp_repo), check=True, capture_output=True,
+    )
+    # Now modify the scope lock — even keeping the same paths, this is
+    # a modification of an existing file. Should be refused.
+    lock_data = json.loads(lock_path.read_text(encoding="utf-8"))
+    lock_data["locked_at"] = "2026-05-12T20:00:00Z"  # benign field change
+    lock_path.write_text(json.dumps(lock_data, indent=2), encoding="utf-8")
+    subprocess.run(["git", "add", str(lock_path)], cwd=str(tmp_repo), check=True)
+
+    result = run_rule("010_scope_lock.py")
+    assert result.returncode != 0
+    err = result.stderr.lower()
+    assert "scope lock" in err or "modification" in err
+    assert "scope/20260512-immut.lock" in result.stderr
+
+
+def test_010_blocks_staged_modification_of_existing_drift_record(
+    tmp_repo, make_branch, ledger_factory, run_rule
+):
+    """REGRESSION (v0.6.0): the rule refuses agent-side modification of
+    an existing drift record (e.g. flipping status to resolved)."""
+    branch, ledger, lock_path, drift_path = _commit_initial_lock_and_drift(
+        tmp_repo, make_branch, ledger_factory, "20260512-drift-mut"
+    )
+    # Agent flips status to resolved (without operator override)
+    drift_data = json.loads(drift_path.read_text(encoding="utf-8"))
+    drift_data["status"] = "resolved"
+    drift_path.write_text(json.dumps(drift_data, indent=2), encoding="utf-8")
+    subprocess.run(["git", "add", str(drift_path)], cwd=str(tmp_repo), check=True)
+
+    result = run_rule("010_scope_lock.py")
+    assert result.returncode != 0
+    err = result.stderr.lower()
+    assert "drift" in err and ("modification" in err or "edit" in err)
+    assert "drift/20260512-drift-mut.json" in result.stderr
+
+
+def test_010_allows_initial_creation_of_scope_lock(
+    tmp_repo, make_branch, ledger_factory, run_rule
+):
+    """Baseline: on the first commit of a task, the scope lock is being
+    ADDED (not modified). The rule should allow this case."""
+    branch = "agent/test/20260512-fresh"
+    make_branch(branch)
+    ledger_factory(
+        branch=branch, allowed_paths=["src/foo.py"], task_id="20260512-fresh"
+    )
+    _write_scope_lock(tmp_repo, "20260512-fresh", branch, ["src/foo.py"])
+    # Stage the new files (addition, not modification)
+    subprocess.run(
+        ["git", "add", ".agent/tasks/20260512-fresh.json", ".agent/scope/20260512-fresh.lock"],
+        cwd=str(tmp_repo),
+        check=True,
+    )
+    result = run_rule("010_scope_lock.py")
+    assert result.returncode == 0, (
+        f"initial scope-lock creation should be allowed: {result.stderr}"
+    )
+
+
+def test_010_operator_override_allows_scope_lock_modification(
+    tmp_repo, make_branch, ledger_factory, run_rule
+):
+    """The CODING_RAILS_OPERATOR_SCOPE_UPDATE=1 env var permits the
+    modification (operator manually approving scope expansion)."""
+    import os as _os
+    branch, ledger, lock_path, drift_path = _commit_initial_lock_and_drift(
+        tmp_repo, make_branch, ledger_factory, "20260512-override"
+    )
+    # Resolve drift to isolate the scope-lock check
+    drift_path.write_text(
+        json.dumps({
+            "task_id": "20260512-override",
+            "branch": branch,
+            "status": "resolved",
+            "unauthorized_paths": [],
+        }),
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "add", str(drift_path)], cwd=str(tmp_repo), check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "resolve", "--no-verify"],
+        cwd=str(tmp_repo), check=True, capture_output=True,
+    )
+
+    # Operator expands scope: ledger AND scope lock together
+    ledger_data = json.loads(ledger.read_text(encoding="utf-8"))
+    ledger_data["allowed_paths"] = ["src/foo.py", "src/bar.py"]
+    ledger.write_text(json.dumps(ledger_data, indent=2), encoding="utf-8")
+
+    lock_data = json.loads(lock_path.read_text(encoding="utf-8"))
+    lock_data["allowed_paths"] = ["src/foo.py", "src/bar.py"]
+    lock_data["scope_hash"] = _scope_hash(["src/foo.py", "src/bar.py"])
+    lock_path.write_text(json.dumps(lock_data, indent=2), encoding="utf-8")
+
+    subprocess.run(
+        ["git", "add", str(ledger), str(lock_path)],
+        cwd=str(tmp_repo), check=True,
+    )
+
+    # Without override: should fail
+    result_blocked = subprocess.run(
+        [sys.executable, str(RULE)],
+        cwd=str(tmp_repo),
+        capture_output=True,
+        text=True,
+    )
+    assert result_blocked.returncode != 0
+
+    # With override: should pass
+    env = dict(_os.environ)
+    env["CODING_RAILS_OPERATOR_SCOPE_UPDATE"] = "1"
+    result_allowed = subprocess.run(
+        [sys.executable, str(RULE)],
+        cwd=str(tmp_repo),
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    assert result_allowed.returncode == 0, (
+        f"override should permit operator-driven update: {result_allowed.stderr}"
+    )
+
+
+# ---- v0.6.0: scope_enforcement config ----
+
+def test_scope_check_disabled_via_config(tmp_repo, make_branch, ledger_factory):
+    """scope_enforcement.enabled=false skips the rule entirely."""
+    import pytest as _pytest
+    _pytest.importorskip("yaml")
+    cfg_dir = tmp_repo / ".agent"
+    cfg_dir.mkdir(exist_ok=True)
+    (cfg_dir / "coding-rails.config.yml").write_text(
+        "scope_enforcement:\n  enabled: false\n", encoding="utf-8"
+    )
+    branch = "agent/test/20260512-disabled"
+    make_branch(branch)
+    ledger_factory(branch=branch, allowed_paths=["src/foo.py"], task_id="20260512-disabled")
+    # Out-of-scope edit
+    (tmp_repo / "evil.py").write_text("oops", encoding="utf-8")
+    result = _run_status(tmp_repo)
+    # Disabled → exit 0 regardless of drift
+    assert result.returncode == 0, result.stderr
+
+
+def test_scope_check_per_project_bookkeeping_paths(tmp_repo, make_branch, ledger_factory):
+    """scope_enforcement.bookkeeping_paths extends auto-allowed globs."""
+    import pytest as _pytest
+    _pytest.importorskip("yaml")
+    cfg_dir = tmp_repo / ".agent"
+    cfg_dir.mkdir(exist_ok=True)
+    (cfg_dir / "coding-rails.config.yml").write_text(
+        "scope_enforcement:\n"
+        "  bookkeeping_paths:\n"
+        '    - "docs/*.md"\n',
+        encoding="utf-8",
+    )
+    branch = "agent/test/20260512-bk"
+    make_branch(branch)
+    ledger_factory(branch=branch, allowed_paths=["src/foo.py"], task_id="20260512-bk")
+    # docs/*.md not in allowed_paths, but added to bookkeeping_paths
+    (tmp_repo / "docs").mkdir()
+    (tmp_repo / "docs" / "notes.md").write_text("notes", encoding="utf-8")
+    result = _run_status(tmp_repo)
+    assert result.returncode == 0, (
+        f"per-project bookkeeping path should be auto-allowed: {result.stderr}"
+    )
